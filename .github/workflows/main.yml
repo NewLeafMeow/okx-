@@ -1,0 +1,21 @@
+name: Run Node Project
+on:
+  push:  # 推送代码时触发（首次提交配置文件会自动执行）
+    branches: [main]
+  schedule:  # 定时每8分钟执行一次
+    - cron: '*/8 * * * *'
+  workflow_dispatch:  # 允许手动触发（配置完可手动点一次执行）
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4  # 拉取仓库代码
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'  # 匹配项目的Node版本
+      - name: Install dependencies
+        run: npm install  # 安装依赖
+      - name: Run project
+        run: node index.js  # 执行项目启动命令，按需修改
+        
