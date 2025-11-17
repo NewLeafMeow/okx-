@@ -340,4 +340,5 @@ async function checkSingleSymbolSignal(symbol) {
         emaMed: emaMedStr,
         emaSlow: emaSlowStr,
         dif: difStr,
-        dea: deaStr
+        dea: deaStr,
+        macd: macdStr,
