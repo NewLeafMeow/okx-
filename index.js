@@ -92,13 +92,29 @@ async function fetchKlines(symbol) {
     }
 }
 
-async function sendSignalEmail(signal, symbol, type) {
-    const subject = type === 'buy' ? `${symbol} 做多信号` : `${symbol} 做空信号`;
-    const info = `${symbol} ${type === 'buy' ? '做多' : '做空'}信号触发！\n` +
-        `EMA快:${signal.emaFast.toFixed(2)}, EMA中:${signal.emaMed.toFixed(2)}, EMA慢:${signal.emaSlow.toFixed(2)}\n` +
-        `DIF:${signal.dif.toFixed(6)}, DEA:${signal.dea.toFixed(6)}, MACD:${signal.macd.toFixed(6)}\n` +
-        `周期: ${INTERVAL}`;
-    console.log(info);
+// 新增：统一发送汇总邮件
+async function sendSummaryEmail(summaryData) {
+    const subject = `多币种${INTERVAL}周期信号汇总 - ${new Date().toLocaleString('zh-CN', { hour12: false })}`;
+    
+    // 构建邮件内容
+    let emailContent = `【多币种${INTERVAL}周期多空信号汇总】\n`;
+    emailContent += `检测时间：${new Date().toLocaleString('zh-CN', { hour12: false })}\n\n`;
+
+    summaryData.forEach(item => {
+        emailContent += `—————— ${item.symbol} ——————\n`;
+        if (item.error) {
+            emailContent += `状态：获取数据失败\n\n`;
+            return;
+        }
+        emailContent += `最新K线：${item.lastCandle.时间}\n`;
+        emailContent += `价格信息：开:${item.lastCandle.开盘价} 高:${item.lastCandle.最高价} 低:${item.lastCandle.最低价} 收:${item.lastCandle.收盘价}\n`;
+        emailContent += `涨跌幅：${item.changeRate}\n`;
+        emailContent += `指标信息：EMA快:${item.emaFast} EMA中:${item.emaMed} EMA慢:${item.emaSlow}\n`;
+        emailContent += `MACD信息：DIF:${item.dif} DEA:${item.dea} MACD:${item.macd}\n`;
+        emailContent += `信号状态：${item.signal}\n\n`;
+    });
+
+    console.log('汇总邮件内容：\n', emailContent);
 
     const transporter = getTransporter();
     try {
@@ -106,20 +122,25 @@ async function sendSignalEmail(signal, symbol, type) {
             from: emailAccounts[currentIndex].user,
             to: EMAIL_TO,
             subject: subject,
-            text: info
+            text: emailContent
         });
-        console.log(`邮件发送成功（${subject}），使用邮箱: ${emailAccounts[currentIndex].user}`);
+        console.log(`汇总邮件发送成功，使用邮箱: ${emailAccounts[currentIndex].user}`);
         currentIndex = (currentIndex + 1) % emailAccounts.length;
     } catch (e) {
-        console.error(`邮箱 ${emailAccounts[currentIndex].user} 发送 ${subject} 失败:`, e);
+        console.error(`邮箱 ${emailAccounts[currentIndex].user} 发送汇总邮件失败:`, e);
     }
 }
 
+// 修改：返回单币种检测结果，不单独发邮件
 async function checkSingleSymbolSignal(symbol) {
+    const result = { symbol };
     const candles = await fetchKlines(symbol);
+    
     if (!candles.length) {
         console.log(`${symbol} 未获取到 K 线，跳过检测`);
-        return;
+        result.error = true;
+        result.signal = '获取数据失败';
+        return result;
     }
 
     const closes = candles.map(c => c.收盘价);
@@ -137,47 +158,67 @@ async function checkSingleSymbolSignal(symbol) {
         changeRate = calculatePriceChangeRate(lastCandle.收盘价, prevClose).toFixed(4) + '%';
     }
 
+    // 格式化指标（处理null情况）
+    const formatVal = (val, fixed = 2) => val != null ? val.toFixed(fixed) : '-';
+    const emaFastStr = formatVal(emaFast[last]);
+    const emaMedStr = formatVal(emaMed[last]);
+    const emaSlowStr = formatVal(emaSlow[last]);
+    const difStr = formatVal(macd.dif[last], 6);
+    const deaStr = formatVal(macd.dea[last], 6);
+    const macdStr = formatVal(macd.macd[last], 6);
+
     console.log(`\n—————— ${symbol} 最新已收盘 K 线和关键指标 ——————`);
     console.log(
         `${lastCandle.时间} | 开:${lastCandle.开盘价} 高:${lastCandle.最高价} 低:${lastCandle.最低价} 收:${lastCandle.收盘价} | ` +
         `涨跌幅:${changeRate} | ` +
-        `EMA快:${emaFast[last]?.toFixed(2) || '-'} EMA中:${emaMed[last]?.toFixed(2) || '-'} EMA慢:${emaSlow[last]?.toFixed(2) || '-'} | ` +
-        `DIF:${macd.dif[last]?.toFixed(6) || '-'} DEA:${macd.dea[last]?.toFixed(6) || '-'} MACD:${macd.macd[last]?.toFixed(6) || '-'}`
+        `EMA快:${emaFastStr} EMA中:${emaMedStr} EMA慢:${emaSlowStr} | ` +
+        `DIF:${difStr} DEA:${deaStr} MACD:${macdStr}`
     );
 
+    // 判断信号
+    let signal = '无多空信号';
     if (emaFast[last] > emaMed[last] && emaMed[last] > emaSlow[last] && macd.dif[last] > macd.dea[last]) {
-        const signal = {
-            emaFast: emaFast[last],
-            emaMed: emaMed[last],
-            emaSlow: emaSlow[last],
-            dif: macd.dif[last],
-            dea: macd.dea[last],
-            macd: macd.macd[last]
-        };
+        signal = '🔴 做多信号';
         console.log(`${symbol} 检测到做多信号！`);
-        await sendSignalEmail(signal, symbol, 'buy');
     } else if (emaFast[last] < emaMed[last] && emaMed[last] < emaSlow[last] && macd.dif[last] < macd.dea[last]) {
-        const signal = {
-            emaFast: emaFast[last],
-            emaMed: emaMed[last],
-            emaSlow: emaSlow[last],
-            dif: macd.dif[last],
-            dea: macd.dea[last],
-            macd: macd.macd[last]
-        };
+        signal = '🔵 做空信号';
         console.log(`${symbol} 检测到做空信号！`);
-        await sendSignalEmail(signal, symbol, 'sell');
     } else {
         console.log(`${symbol} 无多空信号`);
     }
+
+    // 返回单币种结果
+    return {
+        symbol,
+        error: false,
+        lastCandle,
+        changeRate,
+        emaFast: emaFastStr,
+        emaMed: emaMedStr,
+        emaSlow: emaSlowStr,
+        dif: difStr,
+        dea: deaStr,
+        macd: macdStr,
+        signal
+    };
 }
 
 async function main() {
     console.log('开始执行多币种多空信号检测...');
+    // 新增：汇总所有币种结果
+    const summaryData = [];
+    
+    // 遍历所有币种，收集检测结果
     for (const symbol of SYMBOLS) {
-        await checkSingleSymbolSignal(symbol);
+        const result = await checkSingleSymbolSignal(symbol);
+        summaryData.push(result);
     }
-    console.log('\n所有币种检测完成，程序退出（等待下一次定时触发）');
+
+    console.log('\n所有币种检测完成，开始发送汇总邮件...');
+    // 统一发送汇总邮件
+    await sendSummaryEmail(summaryData);
+    
+    console.log('汇总邮件发送完成，程序退出（等待下一次定时触发）');
 }
 
 main();
