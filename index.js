@@ -95,7 +95,31 @@ async function fetchKlines(symbol) {
     }
 }
 
-// -------------------- 单币种买入信号判断 --------------------
+// -------------------- 发送邮件（兼容多空信号） --------------------
+async function sendSignalEmail(signal, symbol, type) {
+    const subject = type === 'buy' ? `${symbol} 做多信号` : `${symbol} 做空信号`;
+    const info = `${symbol} ${type === 'buy' ? '做多' : '做空'}信号触发！\n` +
+        `EMA快:${signal.emaFast.toFixed(2)}, EMA中:${signal.emaMed.toFixed(2)}, EMA慢:${signal.emaSlow.toFixed(2)}\n` +
+        `DIF:${signal.dif.toFixed(6)}, DEA:${signal.dea.toFixed(6)}, MACD:${signal.macd.toFixed(6)}\n` +
+        `周期: ${INTERVAL}`;
+    console.log(info);
+
+    const transporter = getTransporter();
+    try {
+        await transporter.sendMail({
+            from: emailAccounts[currentIndex].user,
+            to: EMAIL_TO,
+            subject: subject,
+            text: info
+        });
+        console.log(`邮件发送成功（${subject}），使用邮箱: ${emailAccounts[currentIndex].user}`);
+        currentIndex = (currentIndex + 1) % emailAccounts.length;
+    } catch (e) {
+        console.error(`邮箱 ${emailAccounts[currentIndex].user} 发送 ${subject} 失败:`, e);
+    }
+}
+
+// -------------------- 单币种多空信号判断（新增做空逻辑） --------------------
 async function checkSingleSymbolSignal(symbol) {
     const candles = await fetchKlines(symbol);
     if (!candles.length) {
@@ -112,6 +136,7 @@ async function checkSingleSymbolSignal(symbol) {
     const last = closes.length - 1;
     const lastCandle = candles[last];
 
+    // 打印最新K线和指标（保持原有格式）
     console.log(`\n—————— ${symbol} 最新已收盘 K 线和关键指标 ——————`);
     console.log(
         `${lastCandle.时间} | 开:${lastCandle.开盘价} 高:${lastCandle.最高价} 低:${lastCandle.最低价} 收:${lastCandle.收盘价} | ` +
@@ -119,7 +144,7 @@ async function checkSingleSymbolSignal(symbol) {
         `DIF:${macd.dif[last]?.toFixed(6) || '-'} DEA:${macd.dea[last]?.toFixed(6) || '-'} MACD:${macd.macd[last]?.toFixed(6) || '-'}`
     );
 
-    // 金叉信号判断
+    // 1. 做多信号判断（原有逻辑：EMA多头排列+MACD金叉）
     if (emaFast[last] > emaMed[last] && emaMed[last] > emaSlow[last] && macd.dif[last] > macd.dea[last]) {
         const signal = {
             emaFast: emaFast[last],
@@ -130,38 +155,30 @@ async function checkSingleSymbolSignal(symbol) {
             macd: macd.macd[last]
         };
         console.log(`${symbol} 检测到做多信号！`);
-        await notifyBuy(signal, symbol);
-    } else {
-        console.log(`${symbol} 没有买入信号`);
+        await sendSignalEmail(signal, symbol, 'buy');
     }
-}
-
-// -------------------- 发送邮件 --------------------
-async function notifyBuy(signal, symbol) {
-    const info = `${symbol} 做多信号触发！\n` +
-        `EMA快:${signal.emaFast.toFixed(2)}, EMA中:${signal.emaMed.toFixed(2)}, EMA慢:${signal.emaSlow.toFixed(2)}\n` +
-        `DIF:${signal.dif.toFixed(6)}, DEA:${signal.dea.toFixed(6)}, MACD:${signal.macd.toFixed(6)}\n` +
-        `周期: ${INTERVAL}`;
-    console.log(info);
-
-    const transporter = getTransporter();
-    try {
-        await transporter.sendMail({
-            from: emailAccounts[currentIndex].user,
-            to: EMAIL_TO,
-            subject: `${symbol} 做多信号`,
-            text: info
-        });
-        console.log(`邮件发送成功（${symbol}），使用邮箱: ${emailAccounts[currentIndex].user}`);
-        currentIndex = (currentIndex + 1) % emailAccounts.length;
-    } catch (e) {
-        console.error(`邮箱 ${emailAccounts[currentIndex].user} 发送 ${symbol} 信号失败:`, e);
+    // 2. 做空信号判断（新增逻辑：EMA空头排列+MACD死叉）
+    else if (emaFast[last] < emaMed[last] && emaMed[last] < emaSlow[last] && macd.dif[last] < macd.dea[last]) {
+        const signal = {
+            emaFast: emaFast[last],
+            emaMed: emaMed[last],
+            emaSlow: emaSlow[last],
+            dif: macd.dif[last],
+            dea: macd.dea[last],
+            macd: macd.macd[last]
+        };
+        console.log(`${symbol} 检测到做空信号！`);
+        await sendSignalEmail(signal, symbol, 'sell');
+    }
+    // 3. 无信号
+    else {
+        console.log(`${symbol} 无多空信号`);
     }
 }
 
 // -------------------- 主函数（批量检测四种币种，单次执行） --------------------
 async function main() {
-    console.log('开始执行多币种信号检测...');
+    console.log('开始执行多币种多空信号检测...');
     for (const symbol of SYMBOLS) {
         await checkSingleSymbolSignal(symbol);
     }
