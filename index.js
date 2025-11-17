@@ -1,29 +1,24 @@
-import fetch from 'node-fetch'; // 用于发起 HTTP 请求
-import nodemailer from 'nodemailer'; // 用于发送邮件
+import fetch from 'node-fetch';
+import nodemailer from 'nodemailer';
 
-// -------------------- 环境变量直接嵌入（无需 .env 文件） --------------------
-// 邮箱配置（直接填写，无需环境变量文件）
 const EMAIL_USER1 = '2410078546@qq.com';
 const EMAIL_PASS1 = 'pbwviuveqmahebag';
 const EMAIL_USER2 = '2040223225@qq.com';
 const EMAIL_PASS2 = 'ocyqfrucuifkbfia';
 const EMAIL_TO = '2410078546@qq.com';
 
-// 核心配置（固定四种币种、K线周期）
-const SYMBOLS = ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'LTC-USDT']; // 四种币
-const INTERVAL = '15m'; // K线周期（原env配置，直接固定）
-const EMA_FAST = 12;  // 快速 EMA 周期
-const EMA_MED = 26;   // 中速 EMA 周期
-const EMA_SLOW = 50;  // 慢速 EMA 周期
+const SYMBOLS = ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'LTC-USDT'];
+const INTERVAL = '15m';
+const EMA_FAST = 12;
+const EMA_MED = 26;
+const EMA_SLOW = 50;
 
-// 多邮箱配置，轮流发送
 const emailAccounts = [
     { user: EMAIL_USER1, pass: EMAIL_PASS1 },
     { user: EMAIL_USER2, pass: EMAIL_PASS2 }
 ];
-let currentIndex = 0; // 当前使用的邮箱索引
+let currentIndex = 0;
 
-// -------------------- 邮件发送器 --------------------
 function getTransporter() {
     const account = emailAccounts[currentIndex];
     return nodemailer.createTransport({
@@ -34,7 +29,6 @@ function getTransporter() {
     });
 }
 
-// -------------------- EMA 计算 --------------------
 function calculateEMA(values, period) {
     const k = 2 / (period + 1);
     const ema = [];
@@ -51,7 +45,6 @@ function calculateEMA(values, period) {
     return ema;
 }
 
-// -------------------- MACD 计算 --------------------
 function calculateMACD(values, fast = 12, slow = 26, signal = 9) {
     const emaFast = calculateEMA(values, fast);
     const emaSlow = calculateEMA(values, slow);
@@ -65,7 +58,11 @@ function calculateMACD(values, fast = 12, slow = 26, signal = 9) {
     return { dif, dea, macd };
 }
 
-// -------------------- 获取单币种 K 线数据 --------------------
+// 新增：计算涨跌幅
+function calculatePriceChangeRate(lastClose, prevClose) {
+    return ((lastClose - prevClose) / prevClose) * 100;
+}
+
 async function fetchKlines(symbol) {
     try {
         console.log(`开始获取 ${symbol} K 线...`);
@@ -74,7 +71,7 @@ async function fetchKlines(symbol) {
         const json = await res.json();
         if (!json.data || !json.data.length) throw new Error('获取 K 线失败');
 
-        let rawData = json.data.reverse().slice(0, -1); // 升序排列+去掉未收盘K线
+        let rawData = json.data.reverse().slice(0, -1);
         const candles = rawData.map(item => {
             const [ts, o, h, l, c, vol] = item;
             return {
@@ -95,7 +92,6 @@ async function fetchKlines(symbol) {
     }
 }
 
-// -------------------- 发送邮件（兼容多空信号） --------------------
 async function sendSignalEmail(signal, symbol, type) {
     const subject = type === 'buy' ? `${symbol} 做多信号` : `${symbol} 做空信号`;
     const info = `${symbol} ${type === 'buy' ? '做多' : '做空'}信号触发！\n` +
@@ -119,7 +115,6 @@ async function sendSignalEmail(signal, symbol, type) {
     }
 }
 
-// -------------------- 单币种多空信号判断（新增做空逻辑） --------------------
 async function checkSingleSymbolSignal(symbol) {
     const candles = await fetchKlines(symbol);
     if (!candles.length) {
@@ -135,16 +130,21 @@ async function checkSingleSymbolSignal(symbol) {
 
     const last = closes.length - 1;
     const lastCandle = candles[last];
+    // 计算最新K线涨跌幅
+    let changeRate = '-';
+    if (last >= 1) {
+        const prevClose = candles[last - 1].收盘价;
+        changeRate = calculatePriceChangeRate(lastCandle.收盘价, prevClose).toFixed(4) + '%';
+    }
 
-    // 打印最新K线和指标（保持原有格式）
     console.log(`\n—————— ${symbol} 最新已收盘 K 线和关键指标 ——————`);
     console.log(
         `${lastCandle.时间} | 开:${lastCandle.开盘价} 高:${lastCandle.最高价} 低:${lastCandle.最低价} 收:${lastCandle.收盘价} | ` +
+        `涨跌幅:${changeRate} | ` +
         `EMA快:${emaFast[last]?.toFixed(2) || '-'} EMA中:${emaMed[last]?.toFixed(2) || '-'} EMA慢:${emaSlow[last]?.toFixed(2) || '-'} | ` +
         `DIF:${macd.dif[last]?.toFixed(6) || '-'} DEA:${macd.dea[last]?.toFixed(6) || '-'} MACD:${macd.macd[last]?.toFixed(6) || '-'}`
     );
 
-    // 1. 做多信号判断（原有逻辑：EMA多头排列+MACD金叉）
     if (emaFast[last] > emaMed[last] && emaMed[last] > emaSlow[last] && macd.dif[last] > macd.dea[last]) {
         const signal = {
             emaFast: emaFast[last],
@@ -156,9 +156,7 @@ async function checkSingleSymbolSignal(symbol) {
         };
         console.log(`${symbol} 检测到做多信号！`);
         await sendSignalEmail(signal, symbol, 'buy');
-    }
-    // 2. 做空信号判断（新增逻辑：EMA空头排列+MACD死叉）
-    else if (emaFast[last] < emaMed[last] && emaMed[last] < emaSlow[last] && macd.dif[last] < macd.dea[last]) {
+    } else if (emaFast[last] < emaMed[last] && emaMed[last] < emaSlow[last] && macd.dif[last] < macd.dea[last]) {
         const signal = {
             emaFast: emaFast[last],
             emaMed: emaMed[last],
@@ -169,14 +167,11 @@ async function checkSingleSymbolSignal(symbol) {
         };
         console.log(`${symbol} 检测到做空信号！`);
         await sendSignalEmail(signal, symbol, 'sell');
-    }
-    // 3. 无信号
-    else {
+    } else {
         console.log(`${symbol} 无多空信号`);
     }
 }
 
-// -------------------- 主函数（批量检测四种币种，单次执行） --------------------
 async function main() {
     console.log('开始执行多币种多空信号检测...');
     for (const symbol of SYMBOLS) {
@@ -185,5 +180,4 @@ async function main() {
     console.log('\n所有币种检测完成，程序退出（等待下一次定时触发）');
 }
 
-// 启动单次执行
 main();
