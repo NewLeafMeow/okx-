@@ -1,7 +1,6 @@
 import fetch from 'node-fetch';
 import nodemailer from 'nodemailer';
-// 新增：导入绘图库
-import { createCanvas, registerFont } from 'canvas';
+import { createCanvas } from 'canvas';
 
 const EMAIL_USER1 = '2410078546@qq.com';
 const EMAIL_PASS1 = 'pbwviuveqmahebag';
@@ -14,10 +13,9 @@ const INTERVAL = '15m';
 const EMA_FAST = 12;
 const EMA_MED = 26;
 const EMA_SLOW = 50;
-// 新增：K线图配置（30根K线）
-const KLINE_COUNT = 30; // 只取最新30根15分钟K线
-const CANVAS_WIDTH = 800; // 画布宽度
-const CANVAS_HEIGHT = 400; // 画布高度
+const KLINE_COUNT = 30; // 最新30根15分钟K线
+const CANVAS_WIDTH = 800;
+const CANVAS_HEIGHT = 400;
 
 const emailAccounts = [
     { user: EMAIL_USER1, pass: EMAIL_PASS1 },
@@ -25,6 +23,7 @@ const emailAccounts = [
 ];
 let currentIndex = 0;
 
+// 邮件 transporter 配置
 function getTransporter() {
     const account = emailAccounts[currentIndex];
     return nodemailer.createTransport({
@@ -35,6 +34,7 @@ function getTransporter() {
     });
 }
 
+// 计算EMA
 function calculateEMA(values, period) {
     const k = 2 / (period + 1);
     const ema = [];
@@ -51,6 +51,7 @@ function calculateEMA(values, period) {
     return ema;
 }
 
+// 计算MACD
 function calculateMACD(values, fast = 12, slow = 26, signal = 9) {
     const emaFast = calculateEMA(values, fast);
     const emaSlow = calculateEMA(values, slow);
@@ -64,10 +65,12 @@ function calculateMACD(values, fast = 12, slow = 26, signal = 9) {
     return { dif, dea, macd };
 }
 
+// 计算涨跌幅
 function calculatePriceChangeRate(lastClose, prevClose) {
     return ((lastClose - prevClose) / prevClose) * 100;
 }
 
+// 获取K线数据（取最新30根）
 async function fetchKlines(symbol) {
     try {
         console.log(`开始获取 ${symbol} K 线...`);
@@ -90,75 +93,73 @@ async function fetchKlines(symbol) {
             };
         });
 
-        // 新增：只保留最新30根K线（符合需求）
-        return candles.slice(-KLINE_COUNT);
+        return candles.slice(-KLINE_COUNT); // 只保留最新30根
     } catch (e) {
         console.error(`${symbol} 获取 K 线出错:`, e);
         return [];
     }
 }
 
-// 新增：生成单币种K线图（Base64格式）
+// 生成K线图（Base64格式）
 function generateKlineChart(symbol, candles, emaFast, emaMed, emaSlow) {
-    // 1. 创建画布
     const canvas = createCanvas(CANVAS_WIDTH, CANVAS_HEIGHT);
     const ctx = canvas.getContext('2d');
 
-    // 2. 画布背景
+    // 画布背景
     ctx.fillStyle = '#1a1a2e';
     ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
-    // 3. 提取30根K线的关键数据（过滤无效EMA）
+    // 提取数据
     const closes = candles.map(c => c.收盘价);
     const highs = candles.map(c => c.最高价);
     const lows = candles.map(c => c.最低价);
     const opens = candles.map(c => c.开盘价);
 
-    // 4. 计算价格范围（留10%边距，避免K线超出画布）
+    // 价格范围（留边距）
     const allPrices = [...highs, ...lows];
     const priceMin = Math.min(...allPrices) * 0.95;
     const priceMax = Math.max(...allPrices) * 1.05;
     const priceRange = priceMax - priceMin;
 
-    // 5. 计算X轴每根K线的宽度和间距
-    const klineWidth = 12; // K线柱宽度
-    const klineGap = 4; // K线间距
-    const xStart = 50; // X轴起始位置
-    const yBottom = CANVAS_HEIGHT - 40; // Y轴底部位置
-    const yTop = 40; // Y轴顶部位置
+    // 坐标轴参数
+    const klineWidth = 12;
+    const klineGap = 4;
+    const xStart = 50;
+    const yBottom = CANVAS_HEIGHT - 40;
+    const yTop = 40;
     const yRange = yBottom - yTop;
 
-    // 6. 绘制坐标轴（X轴时间、Y轴价格）
+    // 绘制坐标轴刻度
     ctx.fillStyle = '#888';
     ctx.font = '12px Arial';
 
-    // Y轴：绘制5个价格刻度
+    // Y轴价格刻度
     for (let i = 0; i <= 4; i++) {
         const y = yBottom - (i / 4) * yRange;
         const price = priceMin + (i / 4) * priceRange;
-        ctx.fillText(price.toFixed(2), 10, y + 4); // 价格文本
+        ctx.fillText(price.toFixed(2), 10, y + 4);
         ctx.beginPath();
         ctx.moveTo(xStart - 5, y);
         ctx.lineTo(xStart, y);
         ctx.strokeStyle = '#444';
-        ctx.stroke(); // 刻度线
+        ctx.stroke();
     }
 
-    // X轴：绘制5个时间刻度（均匀分布在30根K线中）
+    // X轴时间刻度
     const timeStep = Math.floor(KLINE_COUNT / 4);
     for (let i = 0; i <= 4; i++) {
         const idx = Math.min(i * timeStep, KLINE_COUNT - 1);
         const x = xStart + idx * (klineWidth + klineGap);
-        const time = candles[idx].时间.split(' ')[1].slice(0, 5); // 只取时分（如14:30）
-        ctx.fillText(time, x - 10, yBottom + 15); // 时间文本
+        const time = candles[idx].时间.split(' ')[1].slice(0, 5);
+        ctx.fillText(time, x - 10, yBottom + 15);
         ctx.beginPath();
         ctx.moveTo(x, yBottom);
         ctx.lineTo(x, yBottom + 5);
         ctx.strokeStyle = '#444';
-        ctx.stroke(); // 刻度线
+        ctx.stroke();
     }
 
-    // 7. 绘制EMA均线（快/中/慢）
+    // 绘制EMA均线
     const drawEMA = (emaData, color, label) => {
         ctx.beginPath();
         ctx.strokeStyle = color;
@@ -166,30 +167,24 @@ function generateKlineChart(symbol, candles, emaFast, emaMed, emaSlow) {
         let firstValid = true;
 
         for (let i = 0; i < KLINE_COUNT; i++) {
-            if (emaData[i] == null) continue; // 跳过无效EMA值
+            if (emaData[i] == null) continue;
             const x = xStart + i * (klineWidth + klineGap);
             const y = yBottom - ((emaData[i] - priceMin) / priceRange) * yRange;
 
-            if (firstValid) {
-                ctx.moveTo(x, y);
-                firstValid = false;
-            } else {
-                ctx.lineTo(x, y);
-            }
+            firstValid ? (ctx.moveTo(x, y), firstValid = false) : ctx.lineTo(x, y);
         }
         ctx.stroke();
 
-        // 绘制均线标签（右上角）
+        // 均线标签
         ctx.fillStyle = color;
         ctx.fillText(label, CANVAS_WIDTH - 120, 25 + (label.includes('快') ? 0 : label.includes('中') ? 15 : 30));
     };
 
-    // 绘制3条EMA均线
     drawEMA(emaFast, '#ff7f0e', `EMA${EMA_FAST}（快）`);
     drawEMA(emaMed, '#2ca02c', `EMA${EMA_MED}（中）`);
     drawEMA(emaSlow, '#1f77b4', `EMA${EMA_SLOW}（慢）`);
 
-    // 8. 绘制K线柱（阳线红色、阴线绿色）
+    // 绘制K线柱
     for (let i = 0; i < KLINE_COUNT; i++) {
         const open = opens[i];
         const close = closes[i];
@@ -197,23 +192,23 @@ function generateKlineChart(symbol, candles, emaFast, emaMed, emaSlow) {
         const low = lows[i];
         const x = xStart + i * (klineWidth + klineGap);
 
-        // 计算K线柱和影线的Y坐标
+        // 计算Y坐标
         const openY = yBottom - ((open - priceMin) / priceRange) * yRange;
         const closeY = yBottom - ((close - priceMin) / priceRange) * yRange;
         const highY = yBottom - ((high - priceMin) / priceRange) * yRange;
         const lowY = yBottom - ((low - priceMin) / priceRange) * yRange;
 
-        // 区分阳线（涨）和阴线（跌）
+        // 阳线/阴线颜色
         const isBullish = close >= open;
-        ctx.fillStyle = isBullish ? '#ff4d4f' : '#52c41a'; // 阳线红、阴线绿
+        ctx.fillStyle = isBullish ? '#ff4d4f' : '#52c41a';
         ctx.strokeStyle = isBullish ? '#ff4d4f' : '#52c41a';
 
-        // 绘制K线柱（矩形）
+        // 绘制K线柱
         const barHeight = Math.abs(closeY - openY);
         const barTop = Math.min(openY, closeY);
-        ctx.fillRect(x - klineWidth/2, barTop, klineWidth, barHeight || 1); // 防止高度为0
+        ctx.fillRect(x - klineWidth/2, barTop, klineWidth, barHeight || 1);
 
-        // 绘制影线（上下引线）
+        // 绘制影线
         ctx.beginPath();
         ctx.moveTo(x, highY);
         ctx.lineTo(x, lowY);
@@ -221,20 +216,20 @@ function generateKlineChart(symbol, candles, emaFast, emaMed, emaSlow) {
         ctx.stroke();
     }
 
-    // 9. 绘制标题（币种+周期）
+    // 标题
     ctx.fillStyle = '#fff';
     ctx.font = '16px Arial Bold';
     ctx.fillText(`${symbol} ${INTERVAL} K线图（最新${KLINE_COUNT}根）`, xStart, 25);
 
-    // 10. 转成Base64编码（邮件可直接嵌入）
+    // 转Base64
     return canvas.toDataURL('image/png');
 }
 
-// 修改：邮件改为HTML格式（支持嵌入图片）
+// 发送汇总邮件（含K线图）
 async function sendSummaryEmail(summaryData) {
     const subject = `多币种${INTERVAL}周期信号汇总（含K线图） - ${new Date().toLocaleString('zh-CN', { hour12: false })}`;
     
-    // 构建HTML邮件内容（支持图片嵌入）
+    // 构建HTML内容
     let emailContent = `
     <html>
         <body style="font-family: Arial, sans-serif; line-height: 1.6;">
@@ -243,7 +238,7 @@ async function sendSummaryEmail(summaryData) {
             <hr style="border: 1px solid #eee; margin: 20px 0;">
     `;
 
-    // 遍历每个币种，添加信息+K线图
+    // 遍历币种添加内容
     for (const item of summaryData) {
         emailContent += `
             <div style="margin-bottom: 30px;">
@@ -260,7 +255,6 @@ async function sendSummaryEmail(summaryData) {
                 <p><strong>指标信息：</strong>EMA快:${item.emaFast} EMA中:${item.emaMed} EMA慢:${item.emaSlow}</p>
                 <p><strong>MACD信息：</strong>DIF:${item.dif} DEA:${item.dea} MACD:${item.macd}</p>
                 <p><strong>信号状态：</strong><span style="color: ${item.signal.includes('做多') ? '#e74c3c' : item.signal.includes('做空') ? '#3498db' : '#95a5a6'};">${item.signal}</span></p>
-                <!-- 嵌入K线图（Base64） -->
                 <p><strong>K线图：</strong><br><img src="${item.klineImg}" style="max-width: 100%; height: auto;"></p>
             `;
         }
@@ -270,31 +264,29 @@ async function sendSummaryEmail(summaryData) {
 
     emailContent += `</body></html>`;
 
-    console.log('汇总邮件（含K线图）内容生成完成，开始发送...');
-
     const transporter = getTransporter();
     try {
         await transporter.sendMail({
             from: emailAccounts[currentIndex].user,
             to: EMAIL_TO,
             subject: subject,
-            html: emailContent, // 改为HTML格式（关键）
-            text: '你的邮箱不支持HTML，请升级后查看（含K线图和信号汇总）' // 纯文本备用
+            html: emailContent,
+            text: '你的邮箱不支持HTML，请升级后查看（含K线图和信号汇总）'
         });
         console.log(`汇总邮件发送成功，使用邮箱: ${emailAccounts[currentIndex].user}`);
         currentIndex = (currentIndex + 1) % emailAccounts.length;
     } catch (e) {
-        console.error(`邮箱 ${emailAccounts[currentIndex].user} 发送汇总邮件失败:`, e);
+        console.error(`邮箱 ${emailAccounts[currentIndex].user} 发送失败:`, e);
     }
 }
 
-// 修改：新增生成K线图逻辑，返回Base64
+// 单币种信号检测（含K线图生成）
 async function checkSingleSymbolSignal(symbol) {
     const result = { symbol };
     const candles = await fetchKlines(symbol);
     
     if (!candles.length) {
-        console.log(`${symbol} 未获取到 K 线，跳过检测`);
+        console.log(`${symbol} 未获取到K线，跳过`);
         result.error = true;
         result.signal = '获取数据失败';
         return result;
@@ -314,8 +306,38 @@ async function checkSingleSymbolSignal(symbol) {
         changeRate = calculatePriceChangeRate(lastCandle.收盘价, prevClose).toFixed(4) + '%';
     }
 
+    // 格式化指标
     const formatVal = (val, fixed = 2) => val != null ? val.toFixed(fixed) : '-';
     const emaFastStr = formatVal(emaFast[last]);
     const emaMedStr = formatVal(emaMed[last]);
     const emaSlowStr = formatVal(emaSlow[last]);
-   
+    const difStr = formatVal(macd.dif[last], 6);
+    const deaStr = formatVal(macd.dea[last], 6);
+    const macdStr = formatVal(macd.macd[last], 6);
+
+    // 生成K线图Base64
+    const klineImg = generateKlineChart(symbol, candles, emaFast, emaMed, emaSlow);
+
+    // 判断多空信号
+    let signal = '无多空信号';
+    if (emaFast[last] > emaMed[last] && emaMed[last] > emaSlow[last] && macd.dif[last] > macd.dea[last]) {
+        signal = '🔴 做多信号';
+        console.log(`${symbol} 检测到做多信号！`);
+    } else if (emaFast[last] < emaMed[last] && emaMed[last] < emaSlow[last] && macd.dif[last] < macd.dea[last]) {
+        signal = '🔵 做空信号';
+        console.log(`${symbol} 检测到做空信号！`);
+    } else {
+        console.log(`${symbol} 无多空信号`);
+    }
+
+    // 返回结果（含K线图）
+    return {
+        symbol,
+        error: false,
+        lastCandle,
+        changeRate,
+        emaFast: emaFastStr,
+        emaMed: emaMedStr,
+        emaSlow: emaSlowStr,
+        dif: difStr,
+        dea: deaStr
