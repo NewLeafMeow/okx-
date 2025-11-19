@@ -9,9 +9,9 @@ const EMAIL_TO = '2410078546@qq.com';
 
 const SYMBOLS = ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'LTC-USDT'];
 const INTERVAL = '15m';
-const EMA_FAST = 12;
-const EMA_MED = 26;
-const EMA_SLOW = 50;
+const EMA_FAST = 3;
+const EMA_MED = 12;
+const EMA_SLOW = 48;
 
 const emailAccounts = [
     { user: EMAIL_USER1, pass: EMAIL_PASS1 },
@@ -222,3 +222,4 @@ async function main() {
 }
 
 main();
+
