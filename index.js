@@ -1,17 +1,19 @@
 import fetch from 'node-fetch';
 import nodemailer from 'nodemailer';
 
+// 邮箱配置（保持不变）
 const EMAIL_USER1 = '2410078546@qq.com';
 const EMAIL_PASS1 = 'pbwviuveqmahebag';
 const EMAIL_USER2 = '2040223225@qq.com';
 const EMAIL_PASS2 = 'ocyqfrucuifkbfia';
 const EMAIL_TO = '2410078546@qq.com';
 
+// 交易对与周期配置（保持15分钟，可按需修改）
 const SYMBOLS = ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'LTC-USDT'];
 const INTERVAL = '15m';
-const EMA_FAST = 3;
-const EMA_MED = 12;
-const EMA_SLOW = 48;
+// BOLL核心参数（中轨周期20，标准差2.0，适配15分钟K线）
+const BOLL_PERIOD = 20;
+const BOLL_STD = 2.0;
 
 const emailAccounts = [
     { user: EMAIL_USER1, pass: EMAIL_PASS1 },
@@ -19,6 +21,7 @@ const emailAccounts = [
 ];
 let currentIndex = 0;
 
+// 邮箱 transporter 生成（保持不变）
 function getTransporter() {
     const account = emailAccounts[currentIndex];
     return nodemailer.createTransport({
@@ -29,48 +32,69 @@ function getTransporter() {
     });
 }
 
-function calculateEMA(values, period) {
-    const k = 2 / (period + 1);
-    const ema = [];
-    for (let i = 0; i < values.length; i++) {
-        if (i < period - 1) {
-            ema.push(null);
-        } else if (i === period - 1) {
-            const sum = values.slice(0, period).reduce((a, b) => a + b, 0);
-            ema.push(sum / period);
+/**
+ * 新增：计算BOLL指标（中轨+上轨+下轨）
+ * @param {Array} closes - 收盘价数组
+ * @returns {Object} bollData - 包含中轨、上轨、下轨数组
+ */
+function calculateBOLL(closes) {
+    const boll = {
+        middle: [], // 中轨（EMA(20)）
+        upper: [],  // 上轨（中轨+2倍标准差）
+        lower: []   // 下轨（中轨-2倍标准差）
+    };
+    const k = 2 / (BOLL_PERIOD + 1); // EMA平滑系数
+
+    // 计算中轨（EMA(20)）
+    for (let i = 0; i < closes.length; i++) {
+        if (i < BOLL_PERIOD - 1) {
+            boll.middle.push(null); // 前19根K线无EMA值
+        } else if (i === BOLL_PERIOD - 1) {
+            // 第20根K线：取前20根收盘价平均值作为初始EMA
+            const sum = closes.slice(0, BOLL_PERIOD).reduce((a, b) => a + b, 0);
+            boll.middle.push(sum / BOLL_PERIOD);
         } else {
-            ema.push(values[i] * k + ema[i - 1] * (1 - k));
+            // 后续K线：EMA = 当期收盘价*k + 前一期EMA*(1-k)
+            boll.middle.push(closes[i] * k + boll.middle[i - 1] * (1 - k));
         }
     }
-    return ema;
+
+    // 计算上轨和下轨（基于中轨+标准差）
+    for (let i = 0; i < closes.length; i++) {
+        if (i < BOLL_PERIOD - 1) {
+            boll.upper.push(null);
+            boll.lower.push(null);
+            continue;
+        }
+        // 取当前K线及前19根K线的中轨值，计算标准差
+        const recentMiddle = boll.middle.slice(i - BOLL_PERIOD + 1, i + 1);
+        const avg = recentMiddle.reduce((a, b) => a + b, 0) / BOLL_PERIOD;
+        const std = Math.sqrt(
+            recentMiddle.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / BOLL_PERIOD
+        );
+        // 上轨=中轨+2倍标准差，下轨=中轨-2倍标准差
+        boll.upper.push(boll.middle[i] + BOLL_STD * std);
+        boll.lower.push(boll.middle[i] - BOLL_STD * std);
+    }
+
+    return boll;
 }
 
-function calculateMACD(values, fast = 12, slow = 26, signal = 9) {
-    const emaFast = calculateEMA(values, fast);
-    const emaSlow = calculateEMA(values, slow);
-
-    const dif = values.map((v, i) => (emaFast[i] != null && emaSlow[i] != null ? emaFast[i] - emaSlow[i] : null));
-    const difValid = dif.filter(v => v != null);
-    const deaValid = calculateEMA(difValid, signal);
-    const dea = Array(dif.length - deaValid.length).fill(null).concat(deaValid);
-    const macd = dif.map((v, i) => (v != null && dea[i] != null ? (v - dea[i]) * 2 : null));
-
-    return { dif, dea, macd };
-}
-
-// 新增：计算涨跌幅
+// 涨跌幅计算（保持不变）
 function calculatePriceChangeRate(lastClose, prevClose) {
     return ((lastClose - prevClose) / prevClose) * 100;
 }
 
+// 获取K线数据（保持不变，仅保留需要的字段）
 async function fetchKlines(symbol) {
     try {
-        console.log(`开始获取 ${symbol} K 线...`);
+        console.log(`开始获取 ${symbol} ${INTERVAL} K线...`);
         const url = `https://www.okx.com/api/v5/market/candles?instId=${symbol}&bar=${INTERVAL}&limit=100`;
         const res = await fetch(url);
         const json = await res.json();
-        if (!json.data || !json.data.length) throw new Error('获取 K 线失败');
+        if (!json.data || !json.data.length) throw new Error('获取K线失败');
 
+        // 反转K线顺序（按时间正序排列），剔除最后一根未收盘K线
         let rawData = json.data.reverse().slice(0, -1);
         const candles = rawData.map(item => {
             const [ts, o, h, l, c, vol] = item;
@@ -87,18 +111,18 @@ async function fetchKlines(symbol) {
 
         return candles;
     } catch (e) {
-        console.error(`${symbol} 获取 K 线出错:`, e);
+        console.error(`${symbol} 获取K线出错:`, e);
         return [];
     }
 }
 
-// 新增：统一发送汇总邮件
+// 发送汇总邮件（修改为BOLL指标展示）
 async function sendSummaryEmail(summaryData) {
-    const subject = `多币种${INTERVAL}周期信号汇总 - ${new Date().toLocaleString('zh-CN', { hour12: false })}`;
+    const subject = `多币种${INTERVAL}周期BOLL信号汇总 - ${new Date().toLocaleString('zh-CN', { hour12: false })}`;
     
-    // 构建邮件内容
-    let emailContent = `【多币种${INTERVAL}周期多空信号汇总】\n`;
-    emailContent += `检测时间：${new Date().toLocaleString('zh-CN', { hour12: false })}\n\n`;
+    let emailContent = `【多币种${INTERVAL}周期BOLL交易信号汇总】\n`;
+    emailContent += `检测时间：${new Date().toLocaleString('zh-CN', { hour12: false })}\n`;
+    emailContent += `BOLL参数：中轨周期${BOLL_PERIOD}，标准差${BOLL_STD}\n\n`;
 
     summaryData.forEach(item => {
         emailContent += `—————— ${item.symbol} ——————\n`;
@@ -107,11 +131,11 @@ async function sendSummaryEmail(summaryData) {
             return;
         }
         emailContent += `最新K线：${item.lastCandle.时间}\n`;
-        emailContent += `价格信息：开:${item.lastCandle.开盘价} 高:${item.lastCandle.最高价} 低:${item.lastCandle.最低价} 收:${item.lastCandle.收盘价}\n`;
+        emailContent += `价格信息：开:${item.lastCandle.开盘价.toFixed(2)} 高:${item.lastCandle.最高价.toFixed(2)} 低:${item.lastCandle.最低价.toFixed(2)} 收:${item.lastCandle.收盘价.toFixed(2)}\n`;
         emailContent += `涨跌幅：${item.changeRate}\n`;
-        emailContent += `指标信息：EMA快:${item.emaFast} EMA中:${item.emaMed} EMA慢:${item.emaSlow}\n`;
-        emailContent += `MACD信息：DIF:${item.dif} DEA:${item.dea} MACD:${item.macd}\n`;
-        emailContent += `信号状态：${item.signal}\n\n`;
+        emailContent += `BOLL指标：上轨:${item.bollUpper} 中轨:${item.bollMiddle} 下轨:${item.bollLower}\n`;
+        emailContent += `价格位置：${item.pricePosition}\n`;
+        emailContent += `交易信号：${item.signal}\n\n`;
     });
 
     console.log('汇总邮件内容：\n', emailContent);
@@ -131,99 +155,112 @@ async function sendSummaryEmail(summaryData) {
     }
 }
 
-// 修改：返回单币种检测结果，不单独发邮件
+/**
+ * 单币种BOLL信号检测（核心逻辑）
+ * 信号规则：基于之前聊的"突破+回踩"策略，仅保留高概率信号
+ */
 async function checkSingleSymbolSignal(symbol) {
     const result = { symbol };
     const candles = await fetchKlines(symbol);
     
     if (!candles.length) {
-        console.log(`${symbol} 未获取到 K 线，跳过检测`);
+        console.log(`${symbol} 未获取到K线，跳过检测`);
         result.error = true;
         result.signal = '获取数据失败';
         return result;
     }
 
     const closes = candles.map(c => c.收盘价);
-    const emaFast = calculateEMA(closes, EMA_FAST);
-    const emaMed = calculateEMA(closes, EMA_MED);
-    const emaSlow = calculateEMA(closes, EMA_SLOW);
-    const macd = calculateMACD(closes);
+    const boll = calculateBOLL(closes);
+    const lastIdx = closes.length - 1; // 最新一根K线的索引
+    const lastCandle = candles[lastIdx];
 
-    const last = closes.length - 1;
-    const lastCandle = candles[last];
-    // 计算最新K线涨跌幅
+    // 格式化指标值（保留2位小数，无值显示"-"）
+    const formatVal = (val) => val != null ? val.toFixed(2) : '-';
+    const bollUpper = formatVal(boll.upper[lastIdx]);
+    const bollMiddle = formatVal(boll.middle[lastIdx]);
+    const bollLower = formatVal(boll.lower[lastIdx]);
+
+    // 计算涨跌幅
     let changeRate = '-';
-    if (last >= 1) {
-        const prevClose = candles[last - 1].收盘价;
+    if (lastIdx >= 1) {
+        const prevClose = candles[lastIdx - 1].收盘价;
         changeRate = calculatePriceChangeRate(lastCandle.收盘价, prevClose).toFixed(4) + '%';
     }
 
-    // 格式化指标（处理null情况）
-    const formatVal = (val, fixed = 2) => val != null ? val.toFixed(fixed) : '-';
-    const emaFastStr = formatVal(emaFast[last]);
-    const emaMedStr = formatVal(emaMed[last]);
-    const emaSlowStr = formatVal(emaSlow[last]);
-    const difStr = formatVal(macd.dif[last], 6);
-    const deaStr = formatVal(macd.dea[last], 6);
-    const macdStr = formatVal(macd.macd[last], 6);
-
-    console.log(`\n—————— ${symbol} 最新已收盘 K 线和关键指标 ——————`);
-    console.log(
-        `${lastCandle.时间} | 开:${lastCandle.开盘价} 高:${lastCandle.最高价} 低:${lastCandle.最低价} 收:${lastCandle.收盘价} | ` +
-        `涨跌幅:${changeRate} | ` +
-        `EMA快:${emaFastStr} EMA中:${emaMedStr} EMA慢:${emaSlowStr} | ` +
-        `DIF:${difStr} DEA:${deaStr} MACD:${macdStr}`
-    );
-
-    // 判断信号
-    let signal = '无多空信号';
-    if (emaFast[last] > emaMed[last] && emaMed[last] > emaSlow[last] && macd.dif[last] > macd.dea[last]) {
-        signal = '🔴 做多信号';
-        console.log(`${symbol} 检测到做多信号！`);
-    } else if (emaFast[last] < emaMed[last] && emaMed[last] < emaSlow[last] && macd.dif[last] < macd.dea[last]) {
-        signal = '🔵 做空信号';
-        console.log(`${symbol} 检测到做空信号！`);
-    } else {
-        console.log(`${symbol} 无多空信号`);
+    // 价格位置描述
+    let pricePosition = '轨道内波动';
+    if (boll.upper[lastIdx] && lastCandle.收盘价 > boll.upper[lastIdx]) {
+        pricePosition = '突破上轨（超买）';
+    } else if (boll.lower[lastIdx] && lastCandle.收盘价 < boll.lower[lastIdx]) {
+        pricePosition = '跌破下轨（超卖）';
+    } else if (boll.middle[lastIdx] && lastCandle.收盘价 > boll.middle[lastIdx]) {
+        pricePosition = '中轨上方（多头偏强）';
+    } else if (boll.middle[lastIdx] && lastCandle.收盘价 < boll.middle[lastIdx]) {
+        pricePosition = '中轨下方（空头偏强）';
     }
 
-    // 返回单币种结果
+    // BOLL交易信号判断（严格遵循之前的实操逻辑）
+    let signal = '📊 观望信号';
+    if (boll.upper[lastIdx] && boll.middle[lastIdx] && boll.lower[lastIdx]) {
+        const lastClose = lastCandle.收盘价;
+        const prevCandle = candles[lastIdx - 1]; // 前一根K线
+
+        // 1. 做多信号：回踩中轨/下轨不跌破 + 收盘价站回轨道内
+        const isBackstepMiddle = prevCandle.收盘价 < boll.middle[lastIdx] && lastClose >= boll.middle[lastIdx];
+        const isBackstepLower = prevCandle.收盘价 < boll.lower[lastIdx] && lastClose >= boll.lower[lastIdx];
+        if ((isBackstepMiddle || isBackstepLower) && lastCandle.成交量 > prevCandle.成交量 * 1.2) {
+            signal = '🔴 做多信号（回踩支撑+放量反弹）';
+        }
+
+        // 2. 做空信号：回踩上轨不破 + 收盘价跌回轨道内
+        const isBackstepUpper = prevCandle.收盘价 > boll.upper[lastIdx] && lastClose <= boll.upper[lastIdx];
+        if (isBackstepUpper && lastCandle.成交量 > prevCandle.成交量 * 1.2) {
+            signal = '🔵 做空信号（回踩压力+放量下跌）';
+        }
+
+        // 3. 突破信号：放量突破上轨/下轨（趋势启动）
+        const isBreakUpper = lastClose > boll.upper[lastIdx] && lastCandle.成交量 > prevCandle.成交量 * 1.5;
+        const isBreakLower = lastClose < boll.lower[lastIdx] && lastCandle.成交量 > prevCandle.成交量 * 1.5;
+        if (isBreakUpper) signal = '🔥 强力做多（放量突破上轨）';
+        if (isBreakLower) signal = '❄️ 强力做空（放量跌破下轨）';
+    }
+
+    // 打印日志
+    console.log(`\n—————— ${symbol} 最新已收盘K线 ——————`);
+    console.log(
+        `${lastCandle.时间} | 开:${lastCandle.开盘价.toFixed(2)} 高:${lastCandle.最高价.toFixed(2)} 低:${lastCandle.最低价.toFixed(2)} 收:${lastCandle.收盘价.toFixed(2)} | ` +
+        `涨跌幅:${changeRate} | 成交量:${lastCandle.成交量.toFixed(2)} | ` +
+        `BOLL（上:${bollUpper} 中:${bollMiddle} 下:${bollLower}） | ` +
+        `信号:${signal}`
+    );
+
     return {
         symbol,
         error: false,
         lastCandle,
         changeRate,
-        emaFast: emaFastStr,
-        emaMed: emaMedStr,
-        emaSlow: emaSlowStr,
-        dif: difStr,
-        dea: deaStr,
-        macd: macdStr,
+        bollUpper,
+        bollMiddle,
+        bollLower,
+        pricePosition,
         signal
     };
 }
 
+// 主函数（保持不变，批量检测+发送汇总邮件）
 async function main() {
-    console.log('开始执行多币种多空信号检测...');
-    // 新增：汇总所有币种结果
+    console.log(`开始执行多币种${INTERVAL}周期BOLL信号检测...`);
     const summaryData = [];
     
-    // 遍历所有币种，收集检测结果
     for (const symbol of SYMBOLS) {
         const result = await checkSingleSymbolSignal(symbol);
         summaryData.push(result);
     }
 
     console.log('\n所有币种检测完成，开始发送汇总邮件...');
-    // 统一发送汇总邮件
     await sendSummaryEmail(summaryData);
-    
     console.log('汇总邮件发送完成，程序退出（等待下一次定时触发）');
 }
 
 main();
-
-
-
-帮我给macd加上参数，短期6长期24 周期你自己定义，然后ema参数改为短5中20长80
-然后把做多做空信号判定给我短期判定和长期判定，短期的话要求短线大于中线，长线要求短>中>长，差不多这样，然后加入金叉死叉判定。
