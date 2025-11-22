@@ -116,13 +116,14 @@ async function fetchKlines(symbol) {
     }
 }
 
-// 发送汇总邮件（修改为BOLL指标展示）
+// 发送汇总邮件（修改为纯BOLL信号展示）
 async function sendSummaryEmail(summaryData) {
     const subject = `多币种${INTERVAL}周期BOLL信号汇总 - ${new Date().toLocaleString('zh-CN', { hour12: false })}`;
     
     let emailContent = `【多币种${INTERVAL}周期BOLL交易信号汇总】\n`;
     emailContent += `检测时间：${new Date().toLocaleString('zh-CN', { hour12: false })}\n`;
-    emailContent += `BOLL参数：中轨周期${BOLL_PERIOD}，标准差${BOLL_STD}\n\n`;
+    emailContent += `BOLL参数：中轨周期${BOLL_PERIOD}，标准差${BOLL_STD}\n`;
+    emailContent += `信号规则：仅基于BOLL指标 → 跌破下轨→做多，涨破上轨→做空\n\n`;
 
     summaryData.forEach(item => {
         emailContent += `—————— ${item.symbol} ——————\n`;
@@ -157,7 +158,7 @@ async function sendSummaryEmail(summaryData) {
 
 /**
  * 单币种BOLL信号检测（核心逻辑）
- * 信号规则：基于之前聊的"突破+回踩"策略，仅保留高概率信号
+ * 信号规则：仅基于BOLL指标 → 跌破下轨→做多，涨破上轨→做空（无成交量验证）
  */
 async function checkSingleSymbolSignal(symbol) {
     const result = { symbol };
@@ -188,10 +189,10 @@ async function checkSingleSymbolSignal(symbol) {
         changeRate = calculatePriceChangeRate(lastCandle.收盘价, prevClose).toFixed(4) + '%';
     }
 
-    // 价格位置描述
+    // 价格位置描述（适配新信号规则）
     let pricePosition = '轨道内波动';
     if (boll.upper[lastIdx] && lastCandle.收盘价 > boll.upper[lastIdx]) {
-        pricePosition = '突破上轨（超买）';
+        pricePosition = '涨破上轨（超买）';
     } else if (boll.lower[lastIdx] && lastCandle.收盘价 < boll.lower[lastIdx]) {
         pricePosition = '跌破下轨（超卖）';
     } else if (boll.middle[lastIdx] && lastCandle.收盘价 > boll.middle[lastIdx]) {
@@ -200,37 +201,38 @@ async function checkSingleSymbolSignal(symbol) {
         pricePosition = '中轨下方（空头偏强）';
     }
 
-    // BOLL交易信号判断（严格遵循之前的实操逻辑）
+    // BOLL交易信号判断（核心修改：仅BOLL指标，无成交量验证）
     let signal = '📊 观望信号';
     if (boll.upper[lastIdx] && boll.middle[lastIdx] && boll.lower[lastIdx]) {
         const lastClose = lastCandle.收盘价;
-        const prevCandle = candles[lastIdx - 1]; // 前一根K线
 
-        // 1. 做多信号：回踩中轨/下轨不跌破 + 收盘价站回轨道内
-        const isBackstepMiddle = prevCandle.收盘价 < boll.middle[lastIdx] && lastClose >= boll.middle[lastIdx];
-        const isBackstepLower = prevCandle.收盘价 < boll.lower[lastIdx] && lastClose >= boll.lower[lastIdx];
-        if ((isBackstepMiddle || isBackstepLower) && lastCandle.成交量 > prevCandle.成交量 * 1.2) {
-            signal = '🔴 做多信号（回踩支撑+放量反弹）';
+        // 1. 做多信号：跌破下轨（超卖）
+        if (lastClose < boll.lower[lastIdx]) {
+            signal = '🔴 做多信号（跌破下轨，超卖反弹）';
         }
 
-        // 2. 做空信号：回踩上轨不破 + 收盘价跌回轨道内
-        const isBackstepUpper = prevCandle.收盘价 > boll.upper[lastIdx] && lastClose <= boll.upper[lastIdx];
-        if (isBackstepUpper && lastCandle.成交量 > prevCandle.成交量 * 1.2) {
-            signal = '🔵 做空信号（回踩压力+放量下跌）';
+        // 2. 做空信号：涨破上轨（超买）
+        else if (lastClose > boll.upper[lastIdx]) {
+            signal = '🔵 做空信号（涨破上轨，超买回落）';
         }
 
-        // 3. 突破信号：放量突破上轨/下轨（趋势启动）
-        const isBreakUpper = lastClose > boll.upper[lastIdx] && lastCandle.成交量 > prevCandle.成交量 * 1.5;
-        const isBreakLower = lastClose < boll.lower[lastIdx] && lastCandle.成交量 > prevCandle.成交量 * 1.5;
-        if (isBreakUpper) signal = '🔥 强力做多（放量突破上轨）';
-        if (isBreakLower) signal = '❄️ 强力做空（放量跌破下轨）';
+        // 3. 回踩强化信号：突破后回踩确认（无成交量要求）
+        const prevCandle = candles[lastIdx - 1];
+        const isBackstepLower = prevCandle.收盘价 < boll.lower[lastIdx] && lastClose >= boll.lower[lastIdx]; // 跌破后回踩下轨不破
+        const isBackstepUpper = prevCandle.收盘价 > boll.upper[lastIdx] && lastClose <= boll.upper[lastIdx]; // 涨破后回踩上轨不破
+        if (isBackstepLower) {
+            signal = '🔴 做多信号（回踩下轨支撑，反弹确认）';
+        }
+        if (isBackstepUpper) {
+            signal = '🔵 做空信号（回踩上轨压力，回落确认）';
+        }
     }
 
-    // 打印日志
+    // 打印日志（移除成交量展示）
     console.log(`\n—————— ${symbol} 最新已收盘K线 ——————`);
     console.log(
         `${lastCandle.时间} | 开:${lastCandle.开盘价.toFixed(2)} 高:${lastCandle.最高价.toFixed(2)} 低:${lastCandle.最低价.toFixed(2)} 收:${lastCandle.收盘价.toFixed(2)} | ` +
-        `涨跌幅:${changeRate} | 成交量:${lastCandle.成交量.toFixed(2)} | ` +
+        `涨跌幅:${changeRate} | ` +
         `BOLL（上:${bollUpper} 中:${bollMiddle} 下:${bollLower}） | ` +
         `信号:${signal}`
     );
