@@ -1,7 +1,7 @@
 import fetch from 'node-fetch';
 import nodemailer from 'nodemailer';
 
-// ------------------------- 邮箱配置 -------------------------
+// ======================= 邮箱配置 =======================
 const EMAIL_USER1 = '2410078546@qq.com';
 const EMAIL_PASS1 = 'pbwviuveqmahebag';
 const EMAIL_USER2 = '2040223225@qq.com';
@@ -20,181 +20,121 @@ function getTransporter() {
         host: 'smtp.qq.com',
         port: 465,
         secure: true,
-        auth: { user: account.user, pass: account.pass }
+        auth: account
     });
 }
 
-// ------------------------- 配置 -------------------------
-const SYMBOLS = ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'LTC-USDT'];
+// ======================= 配置 =======================
 const INTERVAL = '15m';
-const EMA_SHORT_PERIOD = 20; // EMA20，回踩位置
-const EMA_LONG_PERIOD = 50;  // EMA50，顺势方向
-const VOLUME_MA_PERIOD = 20; // 成交量均线
+const BOLL_PERIOD = 20;
+const BOLL_K = 2;
+const NEAR_RATE = 1.01; // 下轨 1% 内
 
-// ------------------------- EMA计算 -------------------------
-function calculateEMA(closes, period) {
-    const ema = [];
-    const k = 2 / (period + 1);
-    for (let i = 0; i < closes.length; i++) {
-        if (i < period - 1) {
-            ema.push(null);
-        } else if (i === period - 1) {
-            const sum = closes.slice(0, period).reduce((a, b) => a + b, 0);
-            ema.push(sum / period);
-        } else {
-            ema.push(closes[i] * k + ema[i - 1] * (1 - k));
-        }
-    }
-    return ema;
+// ======================= 获取所有币种 =======================
+async function fetchAllSymbols() {
+    const url = 'https://www.okx.com/api/v5/public/instruments?instType=SWAP';
+    const res = await fetch(url);
+    const json = await res.json();
+
+    return json.data
+        .filter(i => i.instId.endsWith('-USDT-SWAP') && i.state === 'live')
+        .map(i => i.instId);
 }
 
-// ------------------------- 成交量均线 -------------------------
-function calculateMAVol(volumeArr, period) {
-    const ma = [];
-    for (let i = 0; i < volumeArr.length; i++) {
-        if (i < period - 1) {
-            ma.push(null);
-        } else {
-            const sum = volumeArr.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0);
-            ma.push(sum / period);
-        }
-    }
-    return ma;
-}
-
-// ------------------------- 涨跌幅 -------------------------
-function calculatePriceChangeRate(lastClose, prevClose) {
-    return ((lastClose - prevClose) / prevClose * 100).toFixed(4) + '%';
-}
-
-// ------------------------- 获取K线 -------------------------
+// ======================= K线 =======================
 async function fetchKlines(symbol) {
-    try {
-        const url = `https://www.okx.com/api/v5/market/candles?instId=${symbol}&bar=${INTERVAL}&limit=100`;
-        const res = await fetch(url);
-        const json = await res.json();
-        if (!json.data || !json.data.length) throw new Error('获取K线失败');
-        const rawData = json.data.reverse().slice(0, -1);
-        return rawData.map(item => {
-            const [ts, o, h, l, c, vol] = item;
-            return {
-                ts: Number(ts),
-                时间: new Date(Number(ts)).toLocaleString('zh-CN', { hour12: false }),
-                开盘价: Number(o),
-                最高价: Number(h),
-                最低价: Number(l),
-                收盘价: Number(c),
-                成交量: Number(vol)
-            };
-        });
-    } catch (e) {
-        console.error(`${symbol} 获取K线出错:`, e);
-        return [];
-    }
+    const url = `https://www.okx.com/api/v5/market/candles?instId=${symbol}&bar=${INTERVAL}&limit=50`;
+    const res = await fetch(url);
+    const json = await res.json();
+    if (!json.data) return [];
+
+    return json.data.reverse().slice(0, -1).map(i => ({
+        ts: Number(i[0]),
+        close: Number(i[4])
+    }));
 }
 
-// ------------------------- 核心短线信号 -------------------------
-async function checkSingleSymbolSignal(symbol) {
-    const result = { symbol };
-    const candles = await fetchKlines(symbol);
-    if (!candles.length) {
-        result.error = true;
-        result.signal = '获取数据失败';
-        return result;
-    }
+// ======================= Bollinger =======================
+function calculateBoll(closes, period, k) {
+    if (closes.length < period) return null;
 
-    const closes = candles.map(c => c.收盘价);
-    const volumes = candles.map(c => c.成交量);
-    const emaShort = calculateEMA(closes, EMA_SHORT_PERIOD); // EMA20
-    const emaLong = calculateEMA(closes, EMA_LONG_PERIOD);   // EMA50
-    const volMA = calculateMAVol(volumes, VOLUME_MA_PERIOD);
-
-    const lastIdx = closes.length - 1;
-    const lastCandle = candles[lastIdx];
-
-    // 顺势信号判断
-    let signal = '📊 观望信号';
-    const lastClose = lastCandle.收盘价;
-    const lastEMA50 = emaLong[lastIdx];
-    const lastEMA20 = emaShort[lastIdx];
-    const lastVolMA = volMA[lastIdx];
-    const lastVol = volumes[lastIdx];
-    const prevClose = closes[lastIdx - 1];
-    const changeRate = calculatePriceChangeRate(lastClose, prevClose);
-
-    if (lastEMA50 != null && lastEMA20 != null && lastVolMA != null) {
-        // 顺势判断
-        if (lastClose > lastEMA50) {
-            // 多头方向
-            if (lastClose >= lastEMA20 && lastVol > lastVolMA) {
-                signal = '🔴 做多信号（顺势+回踩+放量）';
-            }
-        } else if (lastClose < lastEMA50) {
-            // 空头方向
-            if (lastClose <= lastEMA20 && lastVol > lastVolMA) {
-                signal = '🔵 做空信号（顺势+回踩+放量）';
-            }
-        }
-    }
+    const slice = closes.slice(-period);
+    const ma = slice.reduce((a, b) => a + b, 0) / period;
+    const variance = slice.reduce((a, b) => a + Math.pow(b - ma, 2), 0) / period;
+    const std = Math.sqrt(variance);
 
     return {
-        symbol,
-        error: false,
-        lastCandle,
-        changeRate,
-        emaShort: lastEMA20?.toFixed(2) || '-',
-        emaLong: lastEMA50?.toFixed(2) || '-',
-        volMA: lastVolMA?.toFixed(2) || '-',
-        signal
+        mid: ma,
+        upper: ma + k * std,
+        lower: ma - k * std
     };
 }
 
-// ------------------------- 汇总邮件 -------------------------
-async function sendSummaryEmail(summaryData) {
-    const subject = `多币种${INTERVAL}顺势短线信号汇总 - ${new Date().toLocaleString('zh-CN', { hour12: false })}`;
-    let content = `【多币种${INTERVAL}顺势短线信号】\n检测时间：${new Date().toLocaleString('zh-CN', { hour12: false })}\n`;
-    content += `规则：EMA50 定方向 + EMA20 回踩位置 + 成交量确认\n\n`;
+// ======================= 信号检测 =======================
+async function checkSymbol(symbol) {
+    const candles = await fetchKlines(symbol);
+    if (candles.length < BOLL_PERIOD + 1) return null;
 
-    summaryData.forEach(item => {
-        content += `———— ${item.symbol} ————\n`;
-        if (item.error) {
-            content += `状态：获取数据失败\n\n`;
-            return;
-        }
-        content += `最新K线：${item.lastCandle.时间}\n`;
-        content += `开:${item.lastCandle.开盘价} 高:${item.lastCandle.最高价} 低:${item.lastCandle.最低价} 收:${item.lastCandle.收盘价}\n`;
-        content += `涨跌幅：${item.changeRate}\n`;
-        content += `EMA20:${item.emaShort} EMA50:${item.emaLong} 成交量MA:${item.volMA}\n`;
-        content += `交易信号：${item.signal}\n\n`;
-    });
+    const closes = candles.map(c => c.close);
 
-    console.log(content);
+    const last = closes[closes.length - 1];
+    const prev = closes[closes.length - 2];
 
-    const transporter = getTransporter();
-    try {
-        await transporter.sendMail({
-            from: emailAccounts[currentIndex].user,
-            to: EMAIL_TO,
-            subject,
-            text: content
-        });
-        console.log(`汇总邮件发送成功，邮箱: ${emailAccounts[currentIndex].user}`);
-        currentIndex = (currentIndex + 1) % emailAccounts.length;
-    } catch (e) {
-        console.error(`邮箱 ${emailAccounts[currentIndex].user} 发送失败:`, e);
+    const bollNow = calculateBoll(closes.slice(0, -1), BOLL_PERIOD, BOLL_K);
+    const bollPrev = calculateBoll(closes.slice(0, -2), BOLL_PERIOD, BOLL_K);
+
+    if (!bollNow || !bollPrev) return null;
+
+    if (
+        last <= bollNow.lower * NEAR_RATE ||
+        prev <= bollPrev.lower * NEAR_RATE
+    ) {
+        return {
+            symbol,
+            last,
+            lower: bollNow.lower.toFixed(4)
+        };
     }
+
+    return null;
 }
 
-// ------------------------- 主函数 -------------------------
+// ======================= 邮件 =======================
+async function sendEmail(list) {
+    if (!list.length) return;
+
+    let text = `【15分钟 Boll 下轨预警】\n时间：${new Date().toLocaleString('zh-CN', { hour12: false })}\n\n`;
+
+    list.forEach(i => {
+        text += `${i.symbol}\n收盘价：${i.last}\n下轨：${i.lower}\n\n`;
+    });
+
+    const transporter = getTransporter();
+    await transporter.sendMail({
+        from: emailAccounts[currentIndex].user,
+        to: EMAIL_TO,
+        subject: '欧易全币种 Boll 下轨预警',
+        text
+    });
+
+    currentIndex = (currentIndex + 1) % emailAccounts.length;
+}
+
+// ======================= 主流程 =======================
 async function main() {
-    console.log(`开始执行多币种${INTERVAL}顺势短线信号检测...`);
-    const summaryData = [];
-    for (const symbol of SYMBOLS) {
-        const res = await checkSingleSymbolSignal(symbol);
-        summaryData.push(res);
+    console.log('开始扫描欧易所有 USDT 永续合约...');
+    const symbols = await fetchAllSymbols();
+    const hitList = [];
+
+    for (const s of symbols) {
+        try {
+            const res = await checkSymbol(s);
+            if (res) hitList.push(res);
+        } catch (e) {}
     }
-    await sendSummaryEmail(summaryData);
-    console.log('汇总邮件发送完成，程序退出');
+
+    console.log(`命中 ${hitList.length} 个`);
+    await sendEmail(hitList);
 }
 
 main();
