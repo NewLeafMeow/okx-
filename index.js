@@ -28,7 +28,7 @@ function getTransporter() {
 const INTERVAL = '15m';
 const BOLL_PERIOD = 20;
 const BOLL_K = 2;
-const NEAR_RATE = 1.003; // 下轨 1% 内（你之后可以改成 1.003）
+const NEAR_RATE = 1.0002; // 下轨 1% 内（你之后可以改成 1.003）
 
 // ======================= 获取所有币种 =======================
 async function fetchAllSymbols() {
@@ -186,3 +186,4 @@ async function main() {
 }
 
 main();
+
