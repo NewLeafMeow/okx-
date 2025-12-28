@@ -28,11 +28,11 @@ function getTransporter() {
 const INTERVAL = '15m';
 const BOLL_PERIOD = 20;
 const BOLL_K = 2;
-const NEAR_RATE = 1.00002; // 下轨附近（可自行调整）
+const NEAR_RATE = 1.00002; // 极贴近下轨（≈0.002%）
 
 // ======================= 获取所有币种 =======================
 async function fetchAllSymbols() {
-    console.log('[INFO] 正在获取 OKX USDT 永续合约...');
+    console.log('[INFO] 获取欧易 USDT 永续合约列表...');
     const url = 'https://www.okx.com/api/v5/public/instruments?instType=SWAP';
     const res = await fetch(url);
     const json = await res.json();
@@ -41,27 +41,24 @@ async function fetchAllSymbols() {
         .filter(i => i.instId.endsWith('-USDT-SWAP') && i.state === 'live')
         .map(i => i.instId);
 
-    console.log(`[INFO] 获取到币种数量：${symbols.length}`);
+    console.log(`[INFO] 币种数量：${symbols.length}`);
     return symbols;
 }
 
 // ======================= K线 =======================
 async function fetchKlines(symbol) {
     try {
-        const url = `https://www.okx.com/api/v5/market/candles?instId=${symbol}&bar=${INTERVAL}&limit=50`;
+        const url = `https://www.okx.com/api/v5/market/candles?instId=${symbol}&bar=${INTERVAL}&limit=60`;
         const res = await fetch(url);
         const json = await res.json();
         if (!json.data) return [];
 
-        // 保留未收盘 K 线
-        return json.data
-            .reverse()
-            .map(i => ({
-                ts: Number(i[0]),
-                close: Number(i[4])
-            }));
-    } catch (e) {
-        console.log(`[异常] ${symbol} 获取K线失败`);
+        return json.data.reverse().map(i => ({
+            ts: Number(i[0]),
+            close: Number(i[4])
+        }));
+    } catch {
+        console.log(`[异常] ${symbol} K线获取失败`);
         return [];
     }
 }
@@ -85,45 +82,49 @@ function calculateBoll(closes, period, k) {
 // ======================= 单币判断 =======================
 async function checkSymbol(symbol) {
     const candles = await fetchKlines(symbol);
-
-    // 至少需要：未收盘 + 已收盘 + Boll 历史
-    if (candles.length < BOLL_PERIOD + 2) {
-        console.log(`[跳过] ${symbol} K线数量不足`);
+    if (candles.length < BOLL_PERIOD + 3) {
+        console.log(`[跳过] ${symbol} 数据不足`);
         return null;
     }
 
+    // 最新三根（含未收盘）
     const closes = candles.map(c => c.close);
 
-    // 当前未收盘
-    const current = closes[closes.length - 1];
-    // 未收盘前一根（已收盘）
-    const prev = closes[closes.length - 2];
+    const current = closes[closes.length - 1];     // 当前未收盘
+    const prev = closes[closes.length - 2];        // 前一根未收盘
+    const history = closes.slice(0, -2);           // 已完全收盘部分
 
-    // Boll 只用已收盘K线（不包含当前）
-    const boll = calculateBoll(closes.slice(0, -1), BOLL_PERIOD, BOLL_K);
-    if (!boll) {
+    const bollNow = calculateBoll(history.concat(prev), BOLL_PERIOD, BOLL_K);
+    const bollPrev = calculateBoll(history, BOLL_PERIOD, BOLL_K);
+
+    if (!bollNow || !bollPrev) {
         console.log(`[跳过] ${symbol} Boll 计算失败`);
         return null;
     }
 
-    const hitCurrent = current <= boll.lower * NEAR_RATE;
-    const hitPrev = prev <= boll.lower * NEAR_RATE;
+    const hitNow = current <= bollNow.lower * NEAR_RATE;
+    const hitPrev = prev <= bollPrev.lower * NEAR_RATE;
 
-    if (hitCurrent || hitPrev) {
+    if (hitNow || hitPrev) {
+        const hitType = [];
+        if (hitNow) hitType.push('当前K线');
+        if (hitPrev) hitType.push('前一根K线');
+
         console.log(
-            `[命中] ${symbol} | 当前=${current} | 下轨=${boll.lower.toFixed(6)}`
+            `[命中] ${symbol} | ${hitType.join('+')} | 收盘=${current} | 下轨=${bollNow.lower.toFixed(6)}`
         );
 
         return {
             symbol,
-            last: current,
-            lower: boll.lower.toFixed(6)
+            hitType: hitType.join('+'),
+            price: current,
+            lower: bollNow.lower.toFixed(6)
         };
-    } else {
-        console.log(
-            `[未命中] ${symbol} | 当前=${current} | 下轨=${boll.lower.toFixed(6)}`
-        );
     }
+
+    console.log(
+        `[未命中] ${symbol} | 收盘=${current} | 下轨=${bollNow.lower.toFixed(6)}`
+    );
 
     return null;
 }
@@ -135,12 +136,13 @@ async function sendEmail(list) {
         return;
     }
 
-    let text = `【15分钟 Boll 下轨预警（含未收盘）】\n`;
+    let text = `【15分钟 Boll 下轨预警】\n`;
     text += `时间：${new Date().toLocaleString('zh-CN', { hour12: false })}\n\n`;
 
     list.forEach(i => {
         text += `${i.symbol}\n`;
-        text += `当前价：${i.last}\n`;
+        text += `命中类型：${i.hitType}\n`;
+        text += `当前价：${i.price}\n`;
         text += `下轨：${i.lower}\n\n`;
     });
 
@@ -151,21 +153,21 @@ async function sendEmail(list) {
         await transporter.sendMail({
             from: emailAccounts[currentIndex].user,
             to: EMAIL_TO,
-            subject: 'OKX 全币种 Boll 下轨预警（实时）',
+            subject: '欧易全币种 Boll 下轨预警',
             text
         });
 
         console.log(`[成功] 邮件已发送（${emailAccounts[currentIndex].user}）`);
         currentIndex = (currentIndex + 1) % emailAccounts.length;
     } catch (e) {
-        console.log('[失败] 邮件发送异常', e.message);
+        console.log('[失败] 邮件发送异常:', e.message);
     }
 }
 
 // ======================= 主流程 =======================
 async function main() {
     console.log('========================================');
-    console.log('15分钟 Boll 下轨扫描（含未收盘）启动');
+    console.log('15分钟 Boll 下轨扫描启动');
     console.log(`时间：${new Date().toLocaleString('zh-CN', { hour12: false })}`);
     console.log('========================================');
 
