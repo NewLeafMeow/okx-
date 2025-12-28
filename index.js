@@ -28,11 +28,11 @@ function getTransporter() {
 const INTERVAL = '15m';
 const BOLL_PERIOD = 20;
 const BOLL_K = 2;
-const NEAR_RATE = 1.00002; // 下轨 1% 内（你之后可以改成 1.003）
+const NEAR_RATE = 1.00002; // 下轨附近（可自行调整）
 
 // ======================= 获取所有币种 =======================
 async function fetchAllSymbols() {
-    console.log('[INFO] 正在获取欧易所有 USDT 永续合约...');
+    console.log('[INFO] 正在获取 OKX USDT 永续合约...');
     const url = 'https://www.okx.com/api/v5/public/instruments?instType=SWAP';
     const res = await fetch(url);
     const json = await res.json();
@@ -53,9 +53,9 @@ async function fetchKlines(symbol) {
         const json = await res.json();
         if (!json.data) return [];
 
+        // 保留未收盘 K 线
         return json.data
             .reverse()
-            .slice(0, -1) // 丢掉未收盘K线
             .map(i => ({
                 ts: Number(i[0]),
                 close: Number(i[4])
@@ -85,40 +85,43 @@ function calculateBoll(closes, period, k) {
 // ======================= 单币判断 =======================
 async function checkSymbol(symbol) {
     const candles = await fetchKlines(symbol);
-    if (candles.length < BOLL_PERIOD + 1) {
+
+    // 至少需要：未收盘 + 已收盘 + Boll 历史
+    if (candles.length < BOLL_PERIOD + 2) {
         console.log(`[跳过] ${symbol} K线数量不足`);
         return null;
     }
 
     const closes = candles.map(c => c.close);
 
-    const last = closes[closes.length - 1];
+    // 当前未收盘
+    const current = closes[closes.length - 1];
+    // 未收盘前一根（已收盘）
     const prev = closes[closes.length - 2];
 
-    const bollNow = calculateBoll(closes.slice(0, -1), BOLL_PERIOD, BOLL_K);
-    const bollPrev = calculateBoll(closes.slice(0, -2), BOLL_PERIOD, BOLL_K);
-
-    if (!bollNow || !bollPrev) {
+    // Boll 只用已收盘K线（不包含当前）
+    const boll = calculateBoll(closes.slice(0, -1), BOLL_PERIOD, BOLL_K);
+    if (!boll) {
         console.log(`[跳过] ${symbol} Boll 计算失败`);
         return null;
     }
 
-    const hitNow = last <= bollNow.lower * NEAR_RATE;
-    const hitPrev = prev <= bollPrev.lower * NEAR_RATE;
+    const hitCurrent = current <= boll.lower * NEAR_RATE;
+    const hitPrev = prev <= boll.lower * NEAR_RATE;
 
-    if (hitNow || hitPrev) {
+    if (hitCurrent || hitPrev) {
         console.log(
-            `[命中] ${symbol} | 收盘=${last} | 下轨=${bollNow.lower.toFixed(4)}`
+            `[命中] ${symbol} | 当前=${current} | 下轨=${boll.lower.toFixed(6)}`
         );
 
         return {
             symbol,
-            last,
-            lower: bollNow.lower.toFixed(4)
+            last: current,
+            lower: boll.lower.toFixed(6)
         };
     } else {
         console.log(
-            `[未命中] ${symbol} | 收盘=${last} | 下轨=${bollNow.lower.toFixed(4)}`
+            `[未命中] ${symbol} | 当前=${current} | 下轨=${boll.lower.toFixed(6)}`
         );
     }
 
@@ -128,16 +131,16 @@ async function checkSymbol(symbol) {
 // ======================= 邮件 =======================
 async function sendEmail(list) {
     if (!list.length) {
-        console.log('[INFO] 本轮无任何币种命中，下游不发送邮件');
+        console.log('[INFO] 本轮无命中，不发送邮件');
         return;
     }
 
-    let text = `【15分钟 Boll 下轨预警】\n`;
+    let text = `【15分钟 Boll 下轨预警（含未收盘）】\n`;
     text += `时间：${new Date().toLocaleString('zh-CN', { hour12: false })}\n\n`;
 
     list.forEach(i => {
         text += `${i.symbol}\n`;
-        text += `收盘价：${i.last}\n`;
+        text += `当前价：${i.last}\n`;
         text += `下轨：${i.lower}\n\n`;
     });
 
@@ -148,7 +151,7 @@ async function sendEmail(list) {
         await transporter.sendMail({
             from: emailAccounts[currentIndex].user,
             to: EMAIL_TO,
-            subject: '欧易全币种 Boll 下轨预警',
+            subject: 'OKX 全币种 Boll 下轨预警（实时）',
             text
         });
 
@@ -162,7 +165,7 @@ async function sendEmail(list) {
 // ======================= 主流程 =======================
 async function main() {
     console.log('========================================');
-    console.log('15分钟 Boll 下轨扫描启动');
+    console.log('15分钟 Boll 下轨扫描（含未收盘）启动');
     console.log(`时间：${new Date().toLocaleString('zh-CN', { hour12: false })}`);
     console.log('========================================');
 
@@ -173,7 +176,7 @@ async function main() {
         try {
             const res = await checkSymbol(s);
             if (res) hitList.push(res);
-        } catch (e) {
+        } catch {
             console.log(`[异常] ${s} 扫描失败`);
         }
     }
@@ -186,5 +189,3 @@ async function main() {
 }
 
 main();
-
-
