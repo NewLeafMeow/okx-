@@ -28,21 +28,17 @@ function getTransporter() {
 const INTERVAL = '15m';
 const BOLL_PERIOD = 20;
 const BOLL_K = 2;
-const NEAR_RATE = 1.00002; // 极贴近下轨（≈0.002%）
+const NEAR_RATE = 1.00002;
 
 // ======================= 获取所有币种 =======================
 async function fetchAllSymbols() {
-    console.log('[INFO] 获取欧易 USDT 永续合约列表...');
     const url = 'https://www.okx.com/api/v5/public/instruments?instType=SWAP';
     const res = await fetch(url);
     const json = await res.json();
 
-    const symbols = json.data
+    return json.data
         .filter(i => i.instId.endsWith('-USDT-SWAP') && i.state === 'live')
         .map(i => i.instId);
-
-    console.log(`[INFO] 币种数量：${symbols.length}`);
-    return symbols;
 }
 
 // ======================= K线 =======================
@@ -54,11 +50,9 @@ async function fetchKlines(symbol) {
         if (!json.data) return [];
 
         return json.data.reverse().map(i => ({
-            ts: Number(i[0]),
             close: Number(i[4])
         }));
     } catch {
-        console.log(`[异常] ${symbol} K线获取失败`);
         return [];
     }
 }
@@ -73,8 +67,6 @@ function calculateBoll(closes, period, k) {
     const std = Math.sqrt(variance);
 
     return {
-        mid: ma,
-        upper: ma + k * std,
         lower: ma - k * std
     };
 }
@@ -82,112 +74,83 @@ function calculateBoll(closes, period, k) {
 // ======================= 单币判断 =======================
 async function checkSymbol(symbol) {
     const candles = await fetchKlines(symbol);
-    if (candles.length < BOLL_PERIOD + 3) {
-        console.log(`[跳过] ${symbol} 数据不足`);
-        return null;
-    }
+    if (candles.length < BOLL_PERIOD + 3) return null;
 
-    // 最新三根（含未收盘）
     const closes = candles.map(c => c.close);
 
-    const current = closes[closes.length - 1];     // 当前未收盘
-    const prev = closes[closes.length - 2];        // 前一根未收盘
-    const history = closes.slice(0, -2);           // 已完全收盘部分
+    const current = closes[closes.length - 1]; // 当前未收盘
+    const closed = closes[closes.length - 2];  // 最后一根已收盘
+    const history = closes.slice(0, -2);
 
-    const bollNow = calculateBoll(history.concat(prev), BOLL_PERIOD, BOLL_K);
-    const bollPrev = calculateBoll(history, BOLL_PERIOD, BOLL_K);
+    const bollForClosed = calculateBoll(history, BOLL_PERIOD, BOLL_K);
+    const bollForCurrent = calculateBoll(history.concat(closed), BOLL_PERIOD, BOLL_K);
 
-    if (!bollNow || !bollPrev) {
-        console.log(`[跳过] ${symbol} Boll 计算失败`);
-        return null;
-    }
+    if (!bollForClosed || !bollForCurrent) return null;
 
-    const hitNow = current <= bollNow.lower * NEAR_RATE;
-    const hitPrev = prev <= bollPrev.lower * NEAR_RATE;
+    const hitCurrent = current <= bollForCurrent.lower * NEAR_RATE;
+    const hitClosed = closed <= bollForClosed.lower * NEAR_RATE;
 
-    if (hitNow || hitPrev) {
-        const hitType = [];
-        if (hitNow) hitType.push('当前K线');
-        if (hitPrev) hitType.push('前一根K线');
-
-        console.log(
-            `[命中] ${symbol} | ${hitType.join('+')} | 收盘=${current} | 下轨=${bollNow.lower.toFixed(6)}`
-        );
-
-        return {
-            symbol,
-            hitType: hitType.join('+'),
-            price: current,
-            lower: bollNow.lower.toFixed(6)
-        };
-    }
+    if (!hitCurrent && !hitClosed) return null;
 
     console.log(
-        `[未命中] ${symbol} | 收盘=${current} | 下轨=${bollNow.lower.toFixed(6)}`
+        `[命中] ${symbol} | 当前=${hitCurrent ? '是' : '否'} | 已收盘=${hitClosed ? '是' : '否'}`
     );
 
-    return null;
+    return {
+        symbol,
+        current,
+        closed,
+        lowerCurrent: bollForCurrent.lower.toFixed(6),
+        lowerClosed: bollForClosed.lower.toFixed(6),
+        hitCurrent,
+        hitClosed
+    };
 }
 
 // ======================= 邮件 =======================
-async function sendEmail(list) {
-    if (!list.length) {
-        console.log('[INFO] 本轮无命中，不发送邮件');
-        return;
-    }
+async function sendEmail(list, title) {
+    if (!list.length) return;
 
-    let text = `【15分钟 Boll 下轨预警】\n`;
+    let text = `【${title}】\n`;
     text += `时间：${new Date().toLocaleString('zh-CN', { hour12: false })}\n\n`;
 
     list.forEach(i => {
         text += `${i.symbol}\n`;
-        text += `命中类型：${i.hitType}\n`;
-        text += `当前价：${i.price}\n`;
-        text += `下轨：${i.lower}\n\n`;
+        text += `价格：${title.includes('未收盘') ? i.current : i.closed}\n`;
+        text += `下轨：${title.includes('未收盘') ? i.lowerCurrent : i.lowerClosed}\n\n`;
     });
 
-    console.log('[INFO] 正在发送邮件...');
     const transporter = getTransporter();
+    await transporter.sendMail({
+        from: emailAccounts[currentIndex].user,
+        to: EMAIL_TO,
+        subject: title,
+        text
+    });
 
-    try {
-        await transporter.sendMail({
-            from: emailAccounts[currentIndex].user,
-            to: EMAIL_TO,
-            subject: '欧易全币种 Boll 下轨预警',
-            text
-        });
-
-        console.log(`[成功] 邮件已发送（${emailAccounts[currentIndex].user}）`);
-        currentIndex = (currentIndex + 1) % emailAccounts.length;
-    } catch (e) {
-        console.log('[失败] 邮件发送异常:', e.message);
-    }
+    currentIndex = (currentIndex + 1) % emailAccounts.length;
 }
 
 // ======================= 主流程 =======================
 async function main() {
-    console.log('========================================');
     console.log('15分钟 Boll 下轨扫描启动');
-    console.log(`时间：${new Date().toLocaleString('zh-CN', { hour12: false })}`);
-    console.log('========================================');
 
     const symbols = await fetchAllSymbols();
-    const hitList = [];
+    const currentHitList = [];
+    const closedHitList = [];
 
     for (const s of symbols) {
-        try {
-            const res = await checkSymbol(s);
-            if (res) hitList.push(res);
-        } catch {
-            console.log(`[异常] ${s} 扫描失败`);
-        }
+        const res = await checkSymbol(s);
+        if (!res) continue;
+
+        if (res.hitCurrent) currentHitList.push(res);
+        if (res.hitClosed) closedHitList.push(res);
     }
 
-    console.log('========================================');
-    console.log(`扫描完成 | 命中数量：${hitList.length}`);
-    console.log('========================================');
+    await sendEmail(currentHitList, '【当前未收盘K线 · Boll 下轨预警】');
+    await sendEmail(closedHitList, '【最后已收盘K线 · Boll 下轨预警】');
 
-    await sendEmail(hitList);
+    console.log('扫描完成');
 }
 
 main();
