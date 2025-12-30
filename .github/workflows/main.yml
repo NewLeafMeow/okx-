@@ -3,7 +3,7 @@ on:
   push:  # 推送代码时触发（首次提交配置文件会自动执行）
     branches: [main]
   schedule:  # 定时每7分钟执行一次（已修正语法错误）
-    - cron: '*/5 * * * *'
+    - cron: '*/3 * * * *'
   workflow_dispatch:  # 允许手动触发（配置完可手动点一次执行）
 jobs:
   run:
