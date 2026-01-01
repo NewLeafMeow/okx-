@@ -30,9 +30,9 @@ const BOLL_PERIOD = 20;
 const BOLL_K = 2;
 const EMA_SHORT = 20;
 const EMA_LONG = 60;
-const NEAR_RATE = 1.002; // 下轨/上轨允许0.2%偏差
-const EMA_ANGLE_THRESHOLD = 0.005; // 0.5%
-const VOLUME_MULTIPLE = 1.5; // 成交量允许1.5倍波动
+const NEAR_RATE = 1.005;          // 放宽到0.5%偏差
+const EMA_ANGLE_THRESHOLD = 0.01; // 放宽到1%
+const VOLUME_MULTIPLE = 2;        // 成交量允许2倍波动
 
 // ======================= 获取币种 =======================
 async function fetchAllSymbols() {
@@ -89,14 +89,19 @@ function isSideway(closes, volumes) {
     const emaLong = calculateEMA(closes.slice(-EMA_LONG), EMA_LONG);
     if (!emaShort || !emaLong) return false;
 
-    // 均线角度小，趋势弱
     const angleDiff = Math.abs(emaShort - emaLong) / emaLong;
-    if (angleDiff > EMA_ANGLE_THRESHOLD) return false;
-
-    // 成交量平稳
     const recentVol = volumes.slice(-5);
     const avgVol = recentVol.reduce((a,b)=>a+b,0)/recentVol.length;
-    if (recentVol.some(v => v > avgVol * VOLUME_MULTIPLE)) return false;
+
+    if (angleDiff > EMA_ANGLE_THRESHOLD) {
+        console.log(`非震荡 ${closes.length}根: EMA角度差=${angleDiff.toFixed(5)}`);
+        return false;
+    }
+
+    if (recentVol.some(v => v > avgVol * VOLUME_MULTIPLE)) {
+        console.log(`非震荡: 最近成交量 ${recentVol.map(v=>v.toFixed(2)).join(',')} 超过平均${(avgVol*VOLUME_MULTIPLE).toFixed(2)}`);
+        return false;
+    }
 
     return true;
 }
@@ -104,12 +109,18 @@ function isSideway(closes, volumes) {
 // ======================= 单币判断 =======================
 async function checkSymbol(symbol) {
     const candles = await fetchKlines(symbol);
-    if (candles.length < BOLL_PERIOD + 3) return null;
+    if (candles.length < BOLL_PERIOD + 3) {
+        console.log(`${symbol} 跳过: K线不足`);
+        return null;
+    }
 
     const closes = candles.map(c=>c.close);
     const volumes = candles.map(c=>c.volume);
 
-    if (!isSideway(closes, volumes)) return null;
+    if (!isSideway(closes, volumes)) {
+        console.log(`${symbol} 非震荡`);
+        return null;
+    }
 
     const current = closes[closes.length - 1]; // 当前未收盘
     const closed = closes[closes.length - 2];  // 最后一根已收盘
@@ -118,16 +129,21 @@ async function checkSymbol(symbol) {
     const bollClosed = calculateBoll(history, BOLL_PERIOD, BOLL_K);
     const bollCurrent = calculateBoll(history.concat(closed), BOLL_PERIOD, BOLL_K);
 
-    if (!bollClosed || !bollCurrent) return null;
+    if (!bollClosed || !bollCurrent) {
+        console.log(`${symbol} 跳过: BOLL计算失败`);
+        return null;
+    }
 
     // 假突破回归条件
     const hitLong = closed <= bollClosed.lower * NEAR_RATE && current >= bollCurrent.lower;
     const hitShort = closed >= bollClosed.upper / NEAR_RATE && current <= bollCurrent.upper;
 
-    if (!hitLong && !hitShort) return null;
+    if (!hitLong && !hitShort) {
+        console.log(`${symbol} 无信号: closed=${closed}, lower=${bollClosed.lower.toFixed(2)}, upper=${bollClosed.upper.toFixed(2)}, current=${current}`);
+        return null;
+    }
 
     console.log(`[命中] ${symbol} | 做多=${hitLong} | 做空=${hitShort} | 当前价=${current} | 下轨=${bollCurrent.lower.toFixed(6)} 上轨=${bollCurrent.upper.toFixed(6)}`);
-
     return {
         symbol,
         current,
