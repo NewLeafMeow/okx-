@@ -28,47 +28,74 @@ function getTransporter() {
 const INTERVAL = '15m';
 const BOLL_PERIOD = 20;
 const BOLL_K = 2;
+const EMA_SHORT = 20;
+const EMA_LONG = 60;
 const NEAR_RATE = 1.00002;
 
-// ======================= 获取所有币种 =======================
+// ======================= 获取币种 =======================
 async function fetchAllSymbols() {
     const url = 'https://www.okx.com/api/v5/public/instruments?instType=SWAP';
     const res = await fetch(url);
     const json = await res.json();
-
     return json.data
         .filter(i => i.instId.endsWith('-USDT-SWAP') && i.state === 'live')
         .map(i => i.instId);
 }
 
-// ======================= K线 =======================
+// ======================= 获取 K 线 =======================
 async function fetchKlines(symbol) {
     try {
-        const url = `https://www.okx.com/api/v5/market/candles?instId=${symbol}&bar=${INTERVAL}&limit=60`;
+        const url = `https://www.okx.com/api/v5/market/candles?instId=${symbol}&bar=${INTERVAL}&limit=100`;
         const res = await fetch(url);
         const json = await res.json();
         if (!json.data) return [];
-
         return json.data.reverse().map(i => ({
-            close: Number(i[4])
+            close: Number(i[4]),
+            volume: Number(i[5])
         }));
     } catch {
         return [];
     }
 }
 
-// ======================= Bollinger =======================
+// ======================= EMA =======================
+function calculateEMA(closes, period) {
+    if (closes.length < period) return null;
+    const k = 2 / (period + 1);
+    let ema = closes[0];
+    for (let i = 1; i < closes.length; i++) {
+        ema = closes[i] * k + ema * (1 - k);
+    }
+    return ema;
+}
+
+// ======================= BOLL =======================
 function calculateBoll(closes, period, k) {
     if (closes.length < period) return null;
-
     const slice = closes.slice(-period);
     const ma = slice.reduce((a, b) => a + b, 0) / period;
     const variance = slice.reduce((a, b) => a + Math.pow(b - ma, 2), 0) / period;
     const std = Math.sqrt(variance);
+    return { lower: ma - k * std, middle: ma, upper: ma + k * std };
+}
 
-    return {
-        lower: ma - k * std
-    };
+// ======================= 震荡判断 =======================
+function isSideway(closes, volumes) {
+    if (closes.length < EMA_LONG) return false;
+    const emaShort = calculateEMA(closes.slice(-EMA_SHORT), EMA_SHORT);
+    const emaLong = calculateEMA(closes.slice(-EMA_LONG), EMA_LONG);
+    if (!emaShort || !emaLong) return false;
+
+    // 均线角度小，趋势弱
+    const angleDiff = Math.abs(emaShort - emaLong) / emaLong;
+    if (angleDiff > 0.002) return false; // 0.2%以内认为横盘
+
+    // 成交量平稳
+    const recentVol = volumes.slice(-5);
+    const avgVol = recentVol.reduce((a,b)=>a+b,0)/recentVol.length;
+    if (recentVol.some(v=>v > avgVol*1.2)) return false;
+
+    return true;
 }
 
 // ======================= 单币判断 =======================
@@ -76,48 +103,54 @@ async function checkSymbol(symbol) {
     const candles = await fetchKlines(symbol);
     if (candles.length < BOLL_PERIOD + 3) return null;
 
-    const closes = candles.map(c => c.close);
+    const closes = candles.map(c=>c.close);
+    const volumes = candles.map(c=>c.volume);
 
-    const current = closes[closes.length - 1]; // 当前未收盘
-    const closed = closes[closes.length - 2];  // 最后一根已收盘
+    if (!isSideway(closes, volumes)) return null;
+
+    const current = closes[closes.length - 1];
+    const closed = closes[closes.length - 2];
     const history = closes.slice(0, -2);
 
-    const bollForClosed = calculateBoll(history, BOLL_PERIOD, BOLL_K);
-    const bollForCurrent = calculateBoll(history.concat(closed), BOLL_PERIOD, BOLL_K);
+    const bollClosed = calculateBoll(history, BOLL_PERIOD, BOLL_K);
+    const bollCurrent = calculateBoll(history.concat(closed), BOLL_PERIOD, BOLL_K);
 
-    if (!bollForClosed || !bollForCurrent) return null;
+    if (!bollClosed || !bollCurrent) return null;
 
-    const hitCurrent = current <= bollForCurrent.lower * NEAR_RATE;
-    const hitClosed = closed <= bollForClosed.lower * NEAR_RATE;
+    // 假突破回归条件
+    const hitLong = closed <= bollClosed.lower * NEAR_RATE && current >= bollCurrent.lower;
+    const hitShort = closed >= bollClosed.upper / NEAR_RATE && current <= bollCurrent.upper;
 
-    if (!hitCurrent && !hitClosed) return null;
+    if (!hitLong && !hitShort) return null;
 
-    console.log(
-        `[命中] ${symbol} | 当前=${hitCurrent ? '是' : '否'} | 已收盘=${hitClosed ? '是' : '否'}`
-    );
-
+    console.log(`[命中] ${symbol} | 做多=${hitLong} | 做空=${hitShort}`);
     return {
         symbol,
         current,
         closed,
-        lowerCurrent: bollForCurrent.lower.toFixed(6),
-        lowerClosed: bollForClosed.lower.toFixed(6),
-        hitCurrent,
-        hitClosed
+        lowerCurrent: bollCurrent.lower.toFixed(6),
+        upperCurrent: bollCurrent.upper.toFixed(6),
+        lowerClosed: bollClosed.lower.toFixed(6),
+        upperClosed: bollClosed.upper.toFixed(6),
+        hitLong,
+        hitShort
     };
 }
 
 // ======================= 邮件 =======================
 async function sendEmail(list, title) {
     if (!list.length) return;
+    let text = `【${title}】\n时间：${new Date().toLocaleString('zh-CN',{hour12:false})}\n\n`;
 
-    let text = `【${title}】\n`;
-    text += `时间：${new Date().toLocaleString('zh-CN', { hour12: false })}\n\n`;
-
-    list.forEach(i => {
+    list.forEach(i=>{
         text += `${i.symbol}\n`;
-        text += `价格：${title.includes('未收盘') ? i.current : i.closed}\n`;
-        text += `下轨：${title.includes('未收盘') ? i.lowerCurrent : i.lowerClosed}\n\n`;
+        if(title.includes('做多')) {
+            text += `当前价格：${i.current}\n`;
+            text += `BOLL 下轨：${i.lowerCurrent}\n\n`;
+        } else {
+            text += `当前价格：${i.current}\n`;
+            text += `BOLL 上轨：${i.upperCurrent}\n\n`;
+        }
     });
 
     const transporter = getTransporter();
@@ -133,22 +166,21 @@ async function sendEmail(list, title) {
 
 // ======================= 主流程 =======================
 async function main() {
-    console.log('15分钟 Boll 下轨扫描启动');
+    console.log('15分钟震荡行情BOLL扫描启动');
 
     const symbols = await fetchAllSymbols();
-    const currentHitList = [];
-    const closedHitList = [];
+    const longList = [];
+    const shortList = [];
 
-    for (const s of symbols) {
+    for(const s of symbols) {
         const res = await checkSymbol(s);
-        if (!res) continue;
-
-        if (res.hitCurrent) currentHitList.push(res);
-        if (res.hitClosed) closedHitList.push(res);
+        if(!res) continue;
+        if(res.hitLong) longList.push(res);
+        if(res.hitShort) shortList.push(res);
     }
 
-    await sendEmail(currentHitList, '【当前未收盘K线 · Boll 下轨预警】');
-    await sendEmail(closedHitList, '【最后已收盘K线 · Boll 下轨预警】');
+    await sendEmail(longList, '【做多信号 · 假突破回归】');
+    await sendEmail(shortList, '【做空信号 · 假突破回归】');
 
     console.log('扫描完成');
 }
