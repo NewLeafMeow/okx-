@@ -30,7 +30,9 @@ const BOLL_PERIOD = 20;
 const BOLL_K = 2;
 const EMA_SHORT = 20;
 const EMA_LONG = 60;
-const NEAR_RATE = 1.00002;
+const NEAR_RATE = 1.002; // 下轨/上轨允许0.2%偏差
+const EMA_ANGLE_THRESHOLD = 0.005; // 0.5%
+const VOLUME_MULTIPLE = 1.5; // 成交量允许1.5倍波动
 
 // ======================= 获取币种 =======================
 async function fetchAllSymbols() {
@@ -82,18 +84,19 @@ function calculateBoll(closes, period, k) {
 // ======================= 震荡判断 =======================
 function isSideway(closes, volumes) {
     if (closes.length < EMA_LONG) return false;
+
     const emaShort = calculateEMA(closes.slice(-EMA_SHORT), EMA_SHORT);
     const emaLong = calculateEMA(closes.slice(-EMA_LONG), EMA_LONG);
     if (!emaShort || !emaLong) return false;
 
     // 均线角度小，趋势弱
     const angleDiff = Math.abs(emaShort - emaLong) / emaLong;
-    if (angleDiff > 0.002) return false; // 0.2%以内认为横盘
+    if (angleDiff > EMA_ANGLE_THRESHOLD) return false;
 
     // 成交量平稳
     const recentVol = volumes.slice(-5);
     const avgVol = recentVol.reduce((a,b)=>a+b,0)/recentVol.length;
-    if (recentVol.some(v=>v > avgVol*1.2)) return false;
+    if (recentVol.some(v => v > avgVol * VOLUME_MULTIPLE)) return false;
 
     return true;
 }
@@ -108,8 +111,8 @@ async function checkSymbol(symbol) {
 
     if (!isSideway(closes, volumes)) return null;
 
-    const current = closes[closes.length - 1];
-    const closed = closes[closes.length - 2];
+    const current = closes[closes.length - 1]; // 当前未收盘
+    const closed = closes[closes.length - 2];  // 最后一根已收盘
     const history = closes.slice(0, -2);
 
     const bollClosed = calculateBoll(history, BOLL_PERIOD, BOLL_K);
@@ -123,7 +126,8 @@ async function checkSymbol(symbol) {
 
     if (!hitLong && !hitShort) return null;
 
-    console.log(`[命中] ${symbol} | 做多=${hitLong} | 做空=${hitShort}`);
+    console.log(`[命中] ${symbol} | 做多=${hitLong} | 做空=${hitShort} | 当前价=${current} | 下轨=${bollCurrent.lower.toFixed(6)} 上轨=${bollCurrent.upper.toFixed(6)}`);
+
     return {
         symbol,
         current,
@@ -140,15 +144,15 @@ async function checkSymbol(symbol) {
 // ======================= 邮件 =======================
 async function sendEmail(list, title) {
     if (!list.length) return;
+
     let text = `【${title}】\n时间：${new Date().toLocaleString('zh-CN',{hour12:false})}\n\n`;
 
     list.forEach(i=>{
         text += `${i.symbol}\n`;
+        text += `当前价格：${i.current}\n`;
         if(title.includes('做多')) {
-            text += `当前价格：${i.current}\n`;
             text += `BOLL 下轨：${i.lowerCurrent}\n\n`;
         } else {
-            text += `当前价格：${i.current}\n`;
             text += `BOLL 上轨：${i.upperCurrent}\n\n`;
         }
     });
