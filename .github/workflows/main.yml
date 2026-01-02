@@ -1,20 +1,34 @@
-name: Run Node Project
+name: Run Node Projects
 on:
-  push:  # 推送代码时触发（首次提交配置文件会自动执行）
+  push:
     branches: [main]
-  schedule:  # 定时每7分钟执行一次（已修正语法错误）
-    - cron: '*/3 * * * *'
-  workflow_dispatch:  # 允许手动触发（配置完可手动点一次执行）
+  schedule:
+    - cron: '*/5 * * * *'  # 每5分钟执行一次
+  workflow_dispatch:
+
 jobs:
-  run:
+  run_index1:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4  # 拉取仓库代码
+      - uses: actions/checkout@v4
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'  # 匹配项目的Node版本
+          node-version: '20'
       - name: Install dependencies
-        run: npm install  # 安装依赖
-      - name: Run project
-        run: node index.js  # 执行项目启动命令，按需修改
+        run: npm install
+      - name: Run index1.js
+        run: node index1.js
+
+  run_index2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        run: npm install
+      - name: Run index2.js
+        run: node index2.js
