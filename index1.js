@@ -2,27 +2,9 @@ import fetch from 'node-fetch';
 import nodemailer from 'nodemailer';
 
 // ======================= 邮箱配置 =======================
-const EMAIL_USER1 = '2410078546@qq.com';
-const EMAIL_PASS1 = 'pbwviuveqmahebag';
-const EMAIL_USER2 = '2040223225@qq.com';
-const EMAIL_PASS2 = 'ocyqfrucuifkbfia';
+const EMAIL_USER = '2040223225@qq.com';
+const EMAIL_PASS = 'ocyqfrucuifkbfia';
 const EMAIL_TO = '2410078546@qq.com';
-
-const emailAccounts = [
-    { user: EMAIL_USER1, pass: EMAIL_PASS1 },
-    { user: EMAIL_USER2, pass: EMAIL_PASS2 }
-];
-let currentIndex = 0;
-
-function getTransporter() {
-    const account = emailAccounts[currentIndex];
-    return nodemailer.createTransport({
-        host: 'smtp.qq.com',
-        port: 465,
-        secure: true,
-        auth: account
-    });
-}
 
 // ======================= 参数配置 =======================
 const INTERVAL = '15m';
@@ -50,7 +32,8 @@ async function fetchKlines(symbol) {
         if (!json.data) return [];
 
         return json.data.reverse().map(i => ({
-            close: Number(i[4])
+            close: Number(i[4]),
+            low: Number(i[3])
         }));
     } catch {
         return [];
@@ -77,29 +60,26 @@ async function checkSymbol(symbol) {
     if (candles.length < BOLL_PERIOD + 3) return null;
 
     const closes = candles.map(c => c.close);
+    const lows = candles.map(c => c.low);
 
-    const current = closes[closes.length - 1]; // 当前未收盘
-    const closed = closes[closes.length - 2];  // 最后一根已收盘
+    const currentLow = lows[lows.length - 1];   // 当前K线最低价
+    const closedLow = lows[lows.length - 2];    // 最后一根已收盘最低价
     const history = closes.slice(0, -2);
 
     const bollForClosed = calculateBoll(history, BOLL_PERIOD, BOLL_K);
-    const bollForCurrent = calculateBoll(history.concat(closed), BOLL_PERIOD, BOLL_K);
+    const bollForCurrent = calculateBoll(history.concat(closes[closes.length - 2]), BOLL_PERIOD, BOLL_K);
 
     if (!bollForClosed || !bollForCurrent) return null;
 
-    const hitCurrent = current <= bollForCurrent.lower * NEAR_RATE;
-    const hitClosed = closed <= bollForClosed.lower * NEAR_RATE;
+    const hitCurrent = currentLow <= bollForCurrent.lower * NEAR_RATE;
+    const hitClosed = closedLow <= bollForClosed.lower * NEAR_RATE;
 
     if (!hitCurrent && !hitClosed) return null;
 
-    console.log(
-        `[命中] ${symbol} | 当前=${hitCurrent ? '是' : '否'} | 已收盘=${hitClosed ? '是' : '否'}`
-    );
-
     return {
         symbol,
-        current,
-        closed,
+        current: currentLow,
+        closed: closedLow,
         lowerCurrent: bollForCurrent.lower.toFixed(6),
         lowerClosed: bollForClosed.lower.toFixed(6),
         hitCurrent,
@@ -108,27 +88,45 @@ async function checkSymbol(symbol) {
 }
 
 // ======================= 邮件 =======================
-async function sendEmail(list, title) {
+async function sendEmail(list) {
     if (!list.length) return;
 
-    let text = `【${title}】\n`;
-    text += `时间：${new Date().toLocaleString('zh-CN', { hour12: false })}\n\n`;
+    let html = `<h2>【Boll 下轨预警汇总】</h2>`;
+    html += `<p>时间：${new Date().toLocaleString('zh-CN', { hour12: false })}</p>`;
+    html += `<table border="1" cellpadding="5" cellspacing="0">
+                <tr>
+                    <th>币种</th>
+                    <th>当前最低价</th>
+                    <th>当前下轨</th>
+                    <th>已收盘最低价</th>
+                    <th>已收盘下轨</th>
+                </tr>`;
 
     list.forEach(i => {
-        text += `${i.symbol}\n`;
-        text += `价格：${title.includes('未收盘') ? i.current : i.closed}\n`;
-        text += `下轨：${title.includes('未收盘') ? i.lowerCurrent : i.lowerClosed}\n\n`;
+        html += `<tr>
+                    <td>${i.symbol}</td>
+                    <td style="color:${i.hitCurrent ? 'green' : 'black'}">${i.current}</td>
+                    <td>${i.lowerCurrent}</td>
+                    <td style="color:${i.hitClosed ? 'red' : 'black'}">${i.closed}</td>
+                    <td>${i.lowerClosed}</td>
+                 </tr>`;
     });
 
-    const transporter = getTransporter();
+    html += `</table>`;
+
+    const transporter = nodemailer.createTransport({
+        host: 'smtp.qq.com',
+        port: 465,
+        secure: true,
+        auth: { user: EMAIL_USER, pass: EMAIL_PASS }
+    });
+
     await transporter.sendMail({
-        from: emailAccounts[currentIndex].user,
+        from: EMAIL_USER,
         to: EMAIL_TO,
-        subject: title,
-        text
+        subject: '【Boll 下轨预警汇总】',
+        html
     });
-
-    currentIndex = (currentIndex + 1) % emailAccounts.length;
 }
 
 // ======================= 主流程 =======================
@@ -136,19 +134,14 @@ async function main() {
     console.log('15分钟 Boll 下轨扫描启动');
 
     const symbols = await fetchAllSymbols();
-    const currentHitList = [];
-    const closedHitList = [];
+    const hitList = [];
 
     for (const s of symbols) {
         const res = await checkSymbol(s);
-        if (!res) continue;
-
-        if (res.hitCurrent) currentHitList.push(res);
-        if (res.hitClosed) closedHitList.push(res);
+        if (res) hitList.push(res);
     }
 
-    await sendEmail(currentHitList, '【当前未收盘K线 · Boll 下轨预警】');
-    await sendEmail(closedHitList, '【最后已收盘K线 · Boll 下轨预警】');
+    await sendEmail(hitList);
 
     console.log('扫描完成');
 }
